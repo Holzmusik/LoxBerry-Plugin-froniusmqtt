@@ -135,4 +135,10 @@ bei Bedarf eine Go-Toolchain und baut den Daemon aus dem mitgelieferten
 `daemon/`-Quellcode direkt auf dem LoxBerry (kein `go.sum` im Repo,
 `go mod tidy` löst Abhängigkeiten frisch vom Go-Modul-Proxy auf).
 
+## Lizenz
+
+MIT, siehe [LICENSE](LICENSE). Drittanbieter-Abhängigkeiten und ein
+markenrechtlicher Hinweis zum verwendeten Fronius-Logo stehen in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
 
