@@ -1,0 +1,22 @@
+{
+  "fronius": {
+    "host": "",
+    "poll_interval_seconds": 5,
+    "http_timeout_seconds": 5,
+    "battery_control": {
+      "enabled": false,
+      "user": "customer",
+      "password": "",
+      "config_path": "auto"
+    }
+  },
+  "mqtt": {
+    "use_local_broker": true,
+    "host": "",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "topic_prefix": "fronius/",
+    "client_id": "froniusmqtt"
+  }
+}

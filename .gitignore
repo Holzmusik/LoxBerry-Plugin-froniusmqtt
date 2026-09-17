@@ -1,0 +1,7 @@
+# Build-Artefakte - nie einchecken (GitHub generiert ohnehin automatisch
+# ein Tag-Archiv-Zip fuer release.cfg's ARCHIVEURL, siehe README).
+*.zip
+
+# Go: go.sum wird bei jedem Install frisch von postroot.sh via "go mod tidy"
+# erzeugt (siehe README) - bewusst nicht eingecheckt.
+daemon/go.sum

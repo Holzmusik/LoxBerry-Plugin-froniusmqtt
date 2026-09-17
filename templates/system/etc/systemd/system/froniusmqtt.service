@@ -1,0 +1,18 @@
+[Unit]
+Description=Fronius-MQTT Bridge (LoxBerry Plugin)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=FRONIUSMQTT_CONFIG=REPLACELBPCONFIGDIR/config.json
+ExecStart=REPLACELBPBINDIR/froniusmqtt
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:REPLACELBPLOGDIR/froniusmqtt.log
+StandardError=append:REPLACELBPLOGDIR/froniusmqtt.log
+User=loxberry
+Group=loxberry
+
+[Install]
+WantedBy=multi-user.target
