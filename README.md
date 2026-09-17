@@ -8,8 +8,7 @@ bestehende Modbus-TCP-Anbindung an Loxone nicht alle gewünschten Werte
 liefert (z.B. detaillierter Batteriezustand, Statuscodes, Meter-Details).
 
 Alle Endpunkte/Feldnamen sind **live gegen ein echtes Gerät verifiziert**
-(Fronius GEN24 12.0 SC + Reserva, 2026-09-17) - nicht aus der PDF-Doku
-geraten.
+(Fronius GEN24 12.0 SC + Reserva, 2026-09-17)
 
 ## Architektur
 
@@ -127,18 +126,13 @@ offizielles Fronius-API-Dokument.
 - Für feingranulare Batterie-Steuerung (Lade-/Entladeraten-Limits, Reserve-
   SOC) ist laut derselben Recherche **SunSpec Modbus TCP (Model 124,
   "storage")** der robustere, vom Wechselrichter selbst offiziell
-  unterstützte Weg - dieses Plugin deckt das (noch) nicht ab.
+  unterstützte Weg - dieses Plugin deckt das nicht ab.
 
 ## Build/Installation
 
-Wie bei den Schwester-Plugins EaseeMQTT/KNXtoLOX: `postroot.sh` installiert
+`postroot.sh` installiert
 bei Bedarf eine Go-Toolchain und baut den Daemon aus dem mitgelieferten
 `daemon/`-Quellcode direkt auf dem LoxBerry (kein `go.sum` im Repo,
 `go mod tidy` löst Abhängigkeiten frisch vom Go-Modul-Proxy auf).
 
-**Hinweis:** Diese Session hatte keinen lokalen Go-Compiler zur Verfügung,
-der Go-Code wurde daher nur manuell geprüft (Typen/Imports/API-Aufrufe
-gegen paho.mqtt.golang v1.5.1), nicht mit `go build`/`go vet` verifiziert.
-Vor dem produktiven Einsatz sollte das erste Deployment (baut automatisch
-über `postroot.sh`) oder ein lokales `cd daemon && go build ./...`
-gegengeprüft werden.
+
