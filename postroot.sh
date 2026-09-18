@@ -146,5 +146,13 @@ systemctl daemon-reload
 systemctl enable froniusmqtt.service
 systemctl restart froniusmqtt.service
 
+# Logrotate installieren (2026-09-18: ohne das wachsen Logdateien
+# unbegrenzt - siehe Session-Notizen zum easeemqtt/knxmqtt/miraibridge-
+# Vorfall). Gleiches Sed-Muster wie oben bei der systemd-Unit, aus
+# demselben Grund (reines "cp" liesse REPLACELBPLOGDIR woertlich stehen).
+sed \
+  -e "s#REPLACELBPLOGDIR#$LOGDIR#g" \
+  "$PSCRIPTFOLDER/templates/system/etc/logrotate.d/froniusmqtt" > /etc/logrotate.d/froniusmqtt
+
 echo "Fronius-MQTT Plugin Installation abgeschlossen."
 exit 0
