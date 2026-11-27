@@ -19,10 +19,13 @@ Fronius GEN24 (lokale Solar API v1) <-> froniusmqtt (Go, systemd: froniusmqtt.se
 Der Go-Daemon (`daemon/`, aus dem mitgelieferten Quellcode gebaut, kein
 externer `git clone` nötig):
 
-1. Fragt bei jedem Poll-Zyklus (konfigurierbar, Default 5s) zuerst
-   `GetActiveDeviceInfo.cgi` ab (Geräte-Discovery - Wechselrichter/
-   Speicher/Zähler-IDs, **nicht hartcodiert**: neu angeschlossene Geräte
-   erscheinen ohne Neustart des Diensts automatisch)
+1. Ermittelt per `GetActiveDeviceInfo.cgi` die Geräte (Discovery -
+   Wechselrichter/Speicher/Zähler-IDs, **nicht hartcodiert**). Das Ergebnis
+   wird 10 Minuten gecacht und nach einem Abruffehler sofort neu ermittelt.
+   Neu angeschlossene Geräte erscheinen also spätestens nach 10 Minuten,
+   ohne dass der Dienst neu starten muss. Unterstützt ein Wechselrichter
+   `3PInverterData` nicht, wird das bis zur nächsten Discovery nicht erneut
+   versucht.
 2. Ruft für jedes gefundene Gerät die passenden Detail-Endpunkte ab
    (`GetInverterRealtimeData.cgi`, `GetStorageRealtimeData.cgi`,
    `GetMeterRealtimeData.cgi`, `GetPowerFlowRealtimeData.fcgi`)

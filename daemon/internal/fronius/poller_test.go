@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAPI zaehlt die Aufrufe je Endpunkt und liefert feste Testdaten
@@ -196,5 +197,90 @@ func TestPollRoundsValues(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%s = %q, erwartet %q", k, got[k], v)
 		}
+	}
+}
+
+// fakeClock: steuerbare Zeit fuer die Discovery-TTL.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func newTestPoller(f *fakeAPI, categories []string) (*Poller, *fakeClock) {
+	p := newPoller(f, categories)
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	p.now = clk.now
+	return p, clk
+}
+
+func TestDiscoveryCached(t *testing.T) {
+	f := newFakeAPI()
+	p, clk := newTestPoller(f, nil)
+	p.Poll()
+	clk.t = clk.t.Add(5 * time.Second)
+	p.Poll()
+	if f.calls["discovery"] != 1 {
+		t.Fatalf("discovery: %d Aufrufe in 2 Zyklen, erwartet 1", f.calls["discovery"])
+	}
+	if f.calls["common"] != 2 {
+		t.Fatalf("common: %d Aufrufe, erwartet 2", f.calls["common"])
+	}
+	clk.t = clk.t.Add(discoveryTTL)
+	p.Poll()
+	if f.calls["discovery"] != 2 {
+		t.Fatalf("discovery nach TTL: %d Aufrufe, erwartet 2", f.calls["discovery"])
+	}
+}
+
+func TestDiscoveryInvalidatedAfterEndpointError(t *testing.T) {
+	f := newFakeAPI()
+	p, clk := newTestPoller(f, nil)
+	p.Poll()
+	f.err["storage"] = errTest
+	clk.t = clk.t.Add(5 * time.Second)
+	p.Poll()
+	delete(f.err, "storage")
+	clk.t = clk.t.Add(5 * time.Second)
+	p.Poll()
+	if f.calls["discovery"] != 2 {
+		t.Fatalf("discovery: %d Aufrufe, erwartet 2 (Neuermittlung nach Storage-Fehler)", f.calls["discovery"])
+	}
+}
+
+func TestDiscoveryErrorRetriedNextCycle(t *testing.T) {
+	f := newFakeAPI()
+	p, clk := newTestPoller(f, nil)
+	f.err["discovery"] = errTest
+	if kv := p.Poll(); len(kv) != 0 {
+		t.Fatalf("Discovery-Fehler lieferte trotzdem %d Werte", len(kv))
+	}
+	delete(f.err, "discovery")
+	clk.t = clk.t.Add(5 * time.Second)
+	if kv := p.Poll(); len(kv) == 0 {
+		t.Fatalf("nach behobenem Discovery-Fehler keine Werte")
+	}
+	if f.calls["discovery"] != 2 {
+		t.Fatalf("discovery: %d Aufrufe, erwartet 2", f.calls["discovery"])
+	}
+}
+
+func Test3PUnsupportedRememberedUntilRediscovery(t *testing.T) {
+	f := newFakeAPI()
+	f.err["3p"] = errTest
+	p, clk := newTestPoller(f, nil)
+	for i := 0; i < 5; i++ {
+		p.Poll()
+		clk.t = clk.t.Add(5 * time.Second)
+	}
+	if f.calls["3p"] != 1 {
+		t.Fatalf("3p: %d Aufrufe in 5 Zyklen, erwartet 1", f.calls["3p"])
+	}
+	// 3P-Fehler darf die Discovery NICHT invalidieren.
+	if f.calls["discovery"] != 1 {
+		t.Fatalf("discovery: %d Aufrufe, erwartet 1", f.calls["discovery"])
+	}
+	clk.t = clk.t.Add(discoveryTTL)
+	p.Poll()
+	if f.calls["3p"] != 2 {
+		t.Fatalf("3p nach neuer Discovery: %d Aufrufe, erwartet 2", f.calls["3p"])
 	}
 }

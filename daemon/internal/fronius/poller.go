@@ -4,7 +4,13 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// discoveryTTL: so lange wird das Ergebnis von GetActiveDeviceInfo
+// wiederverwendet. Nach einem Fehler eines geraetebezogenen Endpunkts wird
+// sofort neu ermittelt (siehe Poller.invalidate).
+const discoveryTTL = 10 * time.Minute
 
 // KV ist ein einzelner MQTT-State-Topic/Wert-Fund eines Poll-Zyklus - die
 // Bridge (siehe internal/bridge) veroeffentlicht jeden Eintrag retained unter
@@ -30,6 +36,16 @@ type Poller struct {
 	// categories == nil bedeutet "alle Kategorien abfragen" - gleiche
 	// Nil-Semantik wie config.MQTTConfig.EnabledCategories.
 	categories map[string]bool
+
+	now func() time.Time
+	// info/infoAt: gecachte Discovery (nil = beim naechsten Zyklus neu
+	// abfragen).
+	info   *ActiveDeviceInfo
+	infoAt time.Time
+	// no3P: Wechselrichter-IDs, deren 3PInverterData-Abruf fehlschlug
+	// (typisch: einphasiges Geraet). Bis zur naechsten Discovery nicht
+	// erneut versucht - sonst ein Fehl-Request + Log-Zeile pro Zyklus.
+	no3P map[string]bool
 }
 
 // NewPoller: categories ist die Positivliste aus
@@ -41,7 +57,7 @@ func NewPoller(client *Client, categories []string) *Poller {
 }
 
 func newPoller(client api, categories []string) *Poller {
-	p := &Poller{client: client}
+	p := &Poller{client: client, now: time.Now, no3P: map[string]bool{}}
 	if categories != nil {
 		p.categories = make(map[string]bool, len(categories))
 		for _, c := range categories {
@@ -55,11 +71,33 @@ func (p *Poller) wants(category string) bool {
 	return p.categories == nil || p.categories[category]
 }
 
+func (p *Poller) invalidate() {
+	p.info = nil
+}
+
+// devices liefert die (ggf. gecachte) Discovery. Ein neues Ergebnis setzt
+// auch no3P zurueck, damit ein inzwischen getauschtes Geraet eine neue
+// Chance bekommt.
+func (p *Poller) devices() (*ActiveDeviceInfo, error) {
+	if p.info != nil && p.now().Sub(p.infoAt) < discoveryTTL {
+		return p.info, nil
+	}
+	info, err := p.client.GetActiveDeviceInfo()
+	if err != nil {
+		p.info = nil
+		return nil, err
+	}
+	p.info, p.infoAt = info, p.now()
+	p.no3P = map[string]bool{}
+	return info, nil
+}
+
 // Poll fuehrt einen vollstaendigen Abfragezyklus durch: Discovery
 // (GetActiveDeviceInfo, siehe client.go) gefolgt von den Detail-Endpunkten
-// fuer jedes gefundene Geraet. Die Discovery laeuft bei JEDEM Zyklus neu
-// (nicht nur beim Start) - damit ein spaeter zusaetzlich angeschlossenes
-// Geraet automatisch ohne Neustart des Diensts erscheint. Abgewaehlte
+// fuer jedes gefundene Geraet. Die Discovery wird discoveryTTL lang
+// gecacht und danach (oder nach einem Fehler) neu ermittelt - ein spaeter
+// zusaetzlich angeschlossenes Geraet erscheint also spaetestens nach
+// discoveryTTL ohne Neustart des Diensts. Abgewaehlte
 // Kategorien (siehe NewPoller) werden uebersprungen: Common-/3P-Daten nur
 // fuer "inverter", Storage nur fuer "storage", Meter nur fuer "meter",
 // PowerFlow fuer "site" ODER "inverter" (liefert inverter/<id>/state/soc
@@ -74,7 +112,7 @@ func (p *Poller) Poll() []KV {
 	info := &ActiveDeviceInfo{}
 	if wantInverter || wantStorage || wantMeter {
 		var err error
-		info, err = p.client.GetActiveDeviceInfo()
+		info, err = p.devices()
 		if err != nil {
 			log.Printf("fronius: GetActiveDeviceInfo fehlgeschlagen: %v", err)
 			return kv
@@ -89,6 +127,7 @@ func (p *Poller) Poll() []KV {
 
 		if common, err := p.client.GetCommonInverterData(id); err != nil {
 			log.Printf("fronius: CommonInverterData(%s) fehlgeschlagen: %v", id, err)
+			p.invalidate()
 		} else {
 			addFloatPtr(&kv, base+"day_energy", common.DayEnergy)
 			addFloatPtr(&kv, base+"year_energy", common.YearEnergy)
@@ -105,11 +144,15 @@ func (p *Poller) Poll() []KV {
 			addString(&kv, base+"inverter_state", common.InverterState)
 		}
 
+		if p.no3P[id] {
+			continue
+		}
 		if threeP, err := p.client.Get3PInverterData(id); err != nil {
-			// Kein lautes Fehler-Log auf Info-Ebene noetig: manche
-			// (einphasige) Geraete unterstuetzen diesen Scope schlicht
-			// nicht - erwartbarer Regelfall, kein Betriebsproblem.
-			log.Printf("fronius: 3PInverterData(%s) nicht verfuegbar: %v", id, err)
+			// Manche (einphasige) Geraete unterstuetzen diesen Scope
+			// schlicht nicht - erwartbarer Regelfall. Bis zur naechsten
+			// Discovery nicht erneut versuchen, kein Log pro Zyklus.
+			log.Printf("fronius: 3PInverterData(%s) nicht verfuegbar, naechster Versuch nach der naechsten Discovery: %v", id, err)
+			p.no3P[id] = true
 		} else {
 			addFloat(&kv, base+"uac_l1", threeP.UAC_L1)
 			addFloat(&kv, base+"uac_l2", threeP.UAC_L2)
@@ -123,6 +166,7 @@ func (p *Poller) Poll() []KV {
 	if wantStorage && len(info.Storage) > 0 {
 		if storages, err := p.client.GetStorageRealtimeData(); err != nil {
 			log.Printf("fronius: GetStorageRealtimeData fehlgeschlagen: %v", err)
+			p.invalidate()
 		} else {
 			for id, s := range storages {
 				base := "storage/" + id + "/state/"
@@ -143,6 +187,7 @@ func (p *Poller) Poll() []KV {
 	if wantMeter && len(info.Meter) > 0 {
 		if meters, err := p.client.GetMeterRealtimeData(); err != nil {
 			log.Printf("fronius: GetMeterRealtimeData fehlgeschlagen: %v", err)
+			p.invalidate()
 		} else {
 			for id, m := range meters {
 				base := "meter/" + id + "/state/"
