@@ -32,6 +32,13 @@ type BatteryController struct {
 	// wird von ResolvePath() einmalig ermittelt (siehe dort) und danach fuer
 	// alle weiteren Aufrufe wiederverwendet.
 	path string
+	// md5HA1: Fronius-Eigenheit (Community-Berichte, nicht offiziell):
+	// bei algorithm=SHA256 wird HA1 trotzdem per MD5 gebildet. Wird beim
+	// ersten Request ermittelt (siehe digestRequest) und dann beibehalten.
+	md5HA1 bool
+	// variant: Beschreibung der zuletzt erfolgreichen Digest-Variante,
+	// fuer TestLogin/Log.
+	variant string
 }
 
 func NewBatteryController(client *Client, user, password, configPath string) *BatteryController {
@@ -168,8 +175,9 @@ func digestQop(offered string) (string, error) {
 
 // digestAuthorization baut den Authorization-Header fuer eine geparste
 // Challenge. cnonce wird uebergeben (statt intern erzeugt), damit die
-// RFC-7616-Testvektoren nachrechenbar sind.
-func digestAuthorization(ch map[string]string, user, password, method, uri, cnonce string) (string, error) {
+// RFC-7616-Testvektoren nachrechenbar sind. md5HA1=true bildet HA1 per MD5
+// unabhaengig vom angekuendigten Algorithmus (siehe BatteryController.md5HA1).
+func digestAuthorization(ch map[string]string, user, password, method, uri, cnonce string, md5HA1 bool) (string, error) {
 	realm, nonce, opaque, algorithm := ch["realm"], ch["nonce"], ch["opaque"], ch["algorithm"]
 	if realm == "" || nonce == "" {
 		return "", fmt.Errorf("Digest-Challenge ohne realm/nonce")
@@ -183,6 +191,9 @@ func digestAuthorization(ch map[string]string, user, password, method, uri, cnon
 		return "", err
 	}
 	ha1 := h(user + ":" + realm + ":" + password)
+	if md5HA1 {
+		ha1 = md5hex(user + ":" + realm + ":" + password)
+	}
 	ha2 := h(method + ":" + uri)
 	nc := "00000001"
 
@@ -213,58 +224,138 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// digestRequest fuehrt method/path erst UNAUTHENTIFIZIERT aus, um vom Geraet
-// die Digest-Challenge (WWW-Authenticate-Header) zu bekommen, und wiederholt
-// den Request danach EINMAL mit passendem Authorization-Header. Kein Retry
-// bei erneutem 401 (falsches Passwort soll sichtbar fehlschlagen, nicht
-// endlos wiederholt werden).
-func (b *BatteryController) digestRequest(method, path string, body []byte) (int, []byte, error) {
-	url := b.client.baseURL + path
-
-	req, err := http.NewRequest(method, url, bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, err
+// challengeOf liest die Digest-Challenge aus WWW-Authenticate oder - bei
+// neuerer Fronius-Firmware (auf dem GEN24 des Nutzers bestaetigt,
+// 2026-11-27) - aus X-WWW-Authenticate, damit der Browser keinen eigenen
+// Login-Dialog oeffnet.
+func challengeOf(h http.Header) string {
+	if c := h.Get("WWW-Authenticate"); c != "" {
+		return c
 	}
-	req.Header.Set("Content-Type", "application/json")
+	return h.Get("X-WWW-Authenticate")
+}
+
+func isSHA256(algorithm string) bool {
+	return strings.ToUpper(strings.ReplaceAll(algorithm, "-", "")) == "SHA256"
+}
+
+func variantName(algorithm string, md5HA1 bool) string {
+	if algorithm == "" {
+		algorithm = "MD5"
+	}
+	if md5HA1 && isSHA256(algorithm) {
+		return algorithm + " (HA1 per MD5)"
+	}
+	return algorithm
+}
+
+// send fuehrt einen einzelnen Request aus (auth == "" = ohne Authorization).
+func (b *BatteryController) send(method, path string, body []byte, auth string) (int, http.Header, []byte, error) {
+	req, err := http.NewRequest(method, b.client.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
 	resp, err := b.client.http.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return 0, nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	// Neuere Fronius-Firmware schickt die Challenge (nach Community-
-	// Berichten, nicht selbst verifiziert) in X-WWW-Authenticate, damit der
-	// Browser keinen eigenen Login-Dialog oeffnet - beide pruefen.
-	challengeHeader := resp.Header.Get("WWW-Authenticate")
-	if challengeHeader == "" {
-		challengeHeader = resp.Header.Get("X-WWW-Authenticate")
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, respBody, nil
+}
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		// Geraet verlangt (in diesem Aufbau) keine Auth, oder ein anderer
-		// Fehler ist aufgetreten - Antwort unveraendert durchreichen.
-		return resp.StatusCode, nil, nil
-	}
-	if challengeHeader == "" {
-		return 0, nil, fmt.Errorf("%s %s: HTTP 401 ohne Digest-Challenge (weder WWW-Authenticate noch X-WWW-Authenticate)", method, path)
-	}
-
-	authHeader, err := digestAuthorization(parseDigestChallenge(challengeHeader), b.user, b.password, method, path, randomHex(8))
-	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s: %w (Challenge: %q)", method, path, err, challengeHeader)
-	}
-
-	req2, err := http.NewRequest(method, url, bytes.NewReader(body))
+// digestRequest fuehrt method/path erst UNAUTHENTIFIZIERT aus, um vom Geraet
+// die Digest-Challenge zu bekommen, und wiederholt den Request danach mit
+// passendem Authorization-Header. Bei SHA-256 wird nach einem 401 genau
+// EINMAL die Variante "HA1 per MD5" probiert (Fronius-Eigenheit, siehe
+// md5HA1); die funktionierende Variante wird gemerkt. Sonst kein Retry
+// (falsches Passwort soll sichtbar fehlschlagen, nicht endlos wiederholt
+// werden).
+func (b *BatteryController) digestRequest(method, path string, body []byte) (int, []byte, error) {
+	status, hdr, respBody, err := b.send(method, path, body, "")
 	if err != nil {
 		return 0, nil, err
 	}
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Authorization", authHeader)
-	resp2, err := b.client.http.Do(req2)
-	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s (authenticated): %w", method, path, err)
+	if status != http.StatusUnauthorized {
+		// Geraet verlangt (in diesem Aufbau) keine Auth, oder ein anderer
+		// Fehler ist aufgetreten - Antwort unveraendert durchreichen.
+		return status, respBody, nil
 	}
-	defer resp2.Body.Close()
-	respBody, _ := io.ReadAll(resp2.Body)
-	return resp2.StatusCode, respBody, nil
+	challenge := challengeOf(hdr)
+	if challenge == "" {
+		return 0, nil, fmt.Errorf("%s %s: HTTP 401 ohne Digest-Challenge (weder WWW-Authenticate noch X-WWW-Authenticate)", method, path)
+	}
+	ch := parseDigestChallenge(challenge)
+
+	variants := []bool{b.md5HA1}
+	if isSHA256(ch["algorithm"]) {
+		variants = append(variants, !b.md5HA1)
+	}
+	for _, v := range variants {
+		auth, err := digestAuthorization(ch, b.user, b.password, method, path, randomHex(8), v)
+		if err != nil {
+			return 0, nil, fmt.Errorf("%s %s: %w (Challenge: %q)", method, path, err, challenge)
+		}
+		status, hdr, respBody, err = b.send(method, path, body, auth)
+		if err != nil {
+			return 0, nil, fmt.Errorf("%s %s (authenticated): %w", method, path, err)
+		}
+		if status != http.StatusUnauthorized {
+			b.md5HA1 = v
+			b.variant = variantName(ch["algorithm"], v)
+			return status, respBody, nil
+		}
+		// Frische Challenge (neuer nonce) fuer den naechsten Versuch.
+		if c := challengeOf(hdr); c != "" {
+			ch = parseDigestChallenge(c)
+		}
+	}
+	return status, respBody, nil
+}
+
+// LoginResult ist die Antwort von TestLogin - als JSON fuer api.cgi
+// ("froniusmqtt battery-test", siehe main.go).
+type LoginResult struct {
+	OK       bool   `json:"ok"`
+	Path     string `json:"path,omitempty"`
+	HTTPCode int    `json:"http_code,omitempty"`
+	Variant  string `json:"variant,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// TestLogin prueft die Zugangsdaten mit einem rein LESENDEN GET auf den
+// timeofuse-Endpunkt - mit exakt derselben Digest-Implementierung, die
+// SetHold zum Schreiben benutzt. 2xx oder 405 = Login akzeptiert.
+func (b *BatteryController) TestLogin() LoginResult {
+	if err := b.ResolvePath(); err != nil {
+		return LoginResult{Error: err.Error()}
+	}
+	r := LoginResult{Path: b.path}
+	status, _, err := b.digestRequest(http.MethodGet, b.path, nil)
+	if err != nil {
+		if isConnError(err) {
+			r.Error = "Wechselrichter nicht erreichbar: " + err.Error()
+		} else {
+			r.Error = err.Error()
+		}
+		return r
+	}
+	r.HTTPCode = status
+	switch {
+	case status >= 200 && status < 300, status == http.StatusMethodNotAllowed:
+		r.OK, r.Variant = true, b.variant
+	case status == http.StatusUnauthorized:
+		r.Error = "Login abgelehnt - Benutzername/Passwort pruefen"
+	case status == http.StatusNotFound:
+		r.Error = "Endpunkt " + b.path + " existiert auf diesem Geraet nicht (HTTP 404) - anderen Endpunkt-Pfad waehlen"
+	default:
+		r.Error = fmt.Sprintf("Unerwartete Antwort HTTP %d auf %s", status, b.path)
+	}
+	return r
 }

@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -52,11 +53,43 @@ func runCrypto(mode, cfgPath string) {
 	fmt.Println(out)
 }
 
+// runBatteryTest bedient "froniusmqtt battery-test" fuer den "Login testen"-
+// Button der Web-UI (api.cgi): liest {"host","user","password",
+// "config_path"} als JSON von STDIN (Passwort nicht in der Prozessliste),
+// fuehrt mit der Digest-Implementierung des Diensts einen rein LESENDEN GET
+// auf den timeofuse-Endpunkt aus und gibt fronius.LoginResult als JSON aus.
+// Ersetzt den frueheren curl --digest-Test, der X-WWW-Authenticate (neuere
+// Fronius-Firmware) nicht auswerten kann.
+func runBatteryTest() {
+	var in struct {
+		Host       string `json:"host"`
+		User       string `json:"user"`
+		Password   string `json:"password"`
+		ConfigPath string `json:"config_path"`
+	}
+	out := json.NewEncoder(os.Stdout)
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		out.Encode(fronius.LoginResult{Error: "Eingabe nicht lesbar: " + err.Error()})
+		return
+	}
+	if in.Host == "" || in.User == "" || in.Password == "" {
+		out.Encode(fronius.LoginResult{Error: "Host/Benutzername/Passwort fehlt"})
+		return
+	}
+	client := fronius.NewClient(in.Host, 8*time.Second)
+	bc := fronius.NewBatteryController(client, in.User, in.Password, in.ConfigPath)
+	out.Encode(bc.TestLogin())
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 
 	if len(os.Args) >= 3 && (os.Args[1] == "encrypt" || os.Args[1] == "decrypt") {
 		runCrypto(os.Args[1], os.Args[2])
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "battery-test" {
+		runBatteryTest()
 		return
 	}
 

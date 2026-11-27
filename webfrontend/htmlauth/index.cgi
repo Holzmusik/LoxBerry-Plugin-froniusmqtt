@@ -532,7 +532,9 @@ async function testBattery() {
   };
   const r = await api('battery_test', { method: 'POST', body });
   const el = document.getElementById('battery-test-status');
-  el.textContent = r.ok ? ('Login OK (Pfad ' + r.path + ', HTTP ' + r.http_code + ')') : (r.error || 'Login fehlgeschlagen');
+  el.textContent = r.ok
+    ? ('Login OK (Pfad ' + r.path + ', HTTP ' + r.http_code + (r.variant ? ', Digest ' + r.variant : '') + ')')
+    : ((r.error || 'Login fehlgeschlagen') + (r.http_code ? ' [HTTP ' + r.http_code + ']' : ''));
   toast(r.ok ? 'Batterie-Control-Login OK' : (r.error || 'Login fehlgeschlagen'), !!r.ok);
 }
 
