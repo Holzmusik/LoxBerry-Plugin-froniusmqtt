@@ -7,7 +7,14 @@
       "enabled": false,
       "user": "customer",
       "password": "",
-      "config_path": "auto"
+      "config_path": "auto",
+      "soc_limit": {
+        "enabled": false,
+        "min": 5,
+        "max": 80,
+        "write_interval_minutes": 10,
+        "read_interval_minutes": 10
+      }
     }
   },
   "mqtt": {

@@ -21,6 +21,19 @@ type BatteryControlConfig struct {
 	// "/config" bzw. "/api/config" wenn Auto-Detect am Zielgeraet nicht
 	// zuverlaessig funktioniert.
 	ConfigPath string `json:"config_path"`
+
+	// SocLimit: minimalen Ladezustand (BAT_M0_SOC_MIN) lesen/setzen -
+	// unabhaengig von Enabled (hold/release), gleiche Zugangsdaten.
+	SocLimit SocLimitConfig `json:"soc_limit"`
+}
+
+// SocLimitConfig - siehe internal/bridge/soc.go. 0 = Default.
+type SocLimitConfig struct {
+	Enabled              bool `json:"enabled"`
+	Min                  int  `json:"min"`                    // erlaubter Bereich fuer cmd/soc_min, Default 5
+	Max                  int  `json:"max"`                    // Default 80
+	WriteIntervalMinutes int  `json:"write_interval_minutes"` // Mindestabstand Schreiben, Default 10
+	ReadIntervalMinutes  int  `json:"read_interval_minutes"`  // Lesen, Default 10
 }
 
 type FroniusConfig struct {
@@ -86,6 +99,22 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Fronius.BatteryControl.ConfigPath == "" {
 		c.Fronius.BatteryControl.ConfigPath = "auto"
+	}
+	sl := &c.Fronius.BatteryControl.SocLimit
+	if sl.Min <= 0 {
+		sl.Min = 5
+	}
+	if sl.Max <= 0 || sl.Max > 100 {
+		sl.Max = 80
+	}
+	if sl.Min > sl.Max {
+		return nil, fmt.Errorf("config.json: battery_control.soc_limit: min (%d) > max (%d)", sl.Min, sl.Max)
+	}
+	if sl.WriteIntervalMinutes <= 0 {
+		sl.WriteIntervalMinutes = 10
+	}
+	if sl.ReadIntervalMinutes <= 0 {
+		sl.ReadIntervalMinutes = 10
 	}
 	if c.MQTT.Host == "" {
 		return nil, fmt.Errorf("config.json: mqtt.host ist leer - lokalen Broker aktivieren oder externen Broker eintragen")

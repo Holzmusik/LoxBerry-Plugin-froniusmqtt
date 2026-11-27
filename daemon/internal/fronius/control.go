@@ -22,9 +22,15 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 type BatteryController struct {
+	// mu serialisiert alle Zugriffe auf den Wechselrichter-Config-Endpunkt:
+	// hold/release (MQTT-Goroutine) und Min-SoC lesen/schreiben (eigene
+	// Goroutine, siehe socconfig.go) teilen sich path/md5HA1/variant.
+	mu sync.Mutex
+
 	client   *Client
 	user     string
 	password string
@@ -80,6 +86,8 @@ func (b *BatteryController) ResolvePath() error {
 // verifiziert gegen evcc-io/evcc's fronius-solarapi-v1.yaml-Template, siehe
 // Plan-Datei.
 func (b *BatteryController) SetHold(hold bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.ResolvePath(); err != nil {
 		return err
 	}
@@ -333,6 +341,8 @@ type LoginResult struct {
 // timeofuse-Endpunkt - mit exakt derselben Digest-Implementierung, die
 // SetHold zum Schreiben benutzt. 2xx oder 405 = Login akzeptiert.
 func (b *BatteryController) TestLogin() LoginResult {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.ResolvePath(); err != nil {
 		return LoginResult{Error: err.Error()}
 	}

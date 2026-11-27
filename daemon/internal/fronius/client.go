@@ -37,6 +37,10 @@ func isConnError(err error) bool {
 	return errors.As(err, &ne)
 }
 
+// IsConnError ist isConnError fuer andere Pakete (bridge: Min-SoC-Schreiben
+// nach Verbindungsfehler spaeter wiederholen, nach fachlichem Fehler nicht).
+func IsConnError(err error) bool { return isConnError(err) }
+
 // envelope ist die gemeinsame Huelle aller /solar_api/v1/-Endpunkte
 // (Get*.cgi/.fcgi) - NICHT von GetAPIVersion.cgi verwendet, siehe
 // GetAPIVersion() unten.

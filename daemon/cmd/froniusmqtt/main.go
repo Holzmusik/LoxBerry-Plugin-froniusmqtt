@@ -81,6 +81,47 @@ func runBatteryTest() {
 	out.Encode(bc.TestLogin())
 }
 
+// runBatteryConfig bedient "froniusmqtt battery-config" fuer den Button
+// "Batterie-Konfiguration lesen" der Web-UI: gleiche STDIN-Eingabe wie
+// battery-test, rein lesender GET auf .../config/batteries, gibt die
+// erkannten Werte und die Rohantwort als JSON aus.
+func runBatteryConfig() {
+	var in struct {
+		Host       string `json:"host"`
+		User       string `json:"user"`
+		Password   string `json:"password"`
+		ConfigPath string `json:"config_path"`
+	}
+	type result struct {
+		OK      bool   `json:"ok"`
+		Path    string `json:"path,omitempty"`
+		SocMin  *int   `json:"soc_min,omitempty"`
+		SocMax  *int   `json:"soc_max,omitempty"`
+		SocMode string `json:"soc_mode,omitempty"`
+		Raw     string `json:"raw,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+	out := json.NewEncoder(os.Stdout)
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		out.Encode(result{Error: "Eingabe nicht lesbar: " + err.Error()})
+		return
+	}
+	if in.Host == "" || in.User == "" || in.Password == "" {
+		out.Encode(result{Error: "Host/Benutzername/Passwort fehlt"})
+		return
+	}
+	client := fronius.NewClient(in.Host, 8*time.Second)
+	bc := fronius.NewBatteryController(client, in.User, in.Password, in.ConfigPath)
+	st, raw, err := bc.ReadBatteryConfig()
+	r := result{Path: bc.BatteriesPath(), SocMin: st.Min, SocMax: st.Max, SocMode: st.Mode, Raw: string(raw)}
+	if err != nil {
+		r.Error = err.Error()
+	} else {
+		r.OK = true
+	}
+	out.Encode(r)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags)
 
@@ -90,6 +131,10 @@ func main() {
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "battery-test" {
 		runBatteryTest()
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "battery-config" {
+		runBatteryConfig()
 		return
 	}
 
@@ -109,7 +154,7 @@ func main() {
 	poller := fronius.NewPoller(client, cfg.MQTT.EnabledCategories)
 
 	var battery *fronius.BatteryController
-	if cfg.Fronius.BatteryControl.Enabled {
+	if cfg.Fronius.BatteryControl.Enabled || cfg.Fronius.BatteryControl.SocLimit.Enabled {
 		battery = fronius.NewBatteryController(
 			client,
 			cfg.Fronius.BatteryControl.User,
@@ -124,8 +169,10 @@ func main() {
 	}
 	defer br.Disconnect()
 
-	log.Printf("froniusmqtt gestartet - Host %s, Poll-Intervall %ds, MQTT-Prefix %q, Batterie-Control %v",
-		cfg.Fronius.Host, cfg.Fronius.PollIntervalSeconds, cfg.MQTT.TopicPrefix, cfg.Fronius.BatteryControl.Enabled)
+	sl := cfg.Fronius.BatteryControl.SocLimit
+	log.Printf("froniusmqtt gestartet - Host %s, Poll-Intervall %ds, MQTT-Prefix %q, Batterie-Control %v, Min-SoC-Steuerung %v (%d..%d%%, Schreibabstand %d min)",
+		cfg.Fronius.Host, cfg.Fronius.PollIntervalSeconds, cfg.MQTT.TopicPrefix, cfg.Fronius.BatteryControl.Enabled,
+		sl.Enabled, sl.Min, sl.Max, sl.WriteIntervalMinutes)
 
 	br.RunPollLoop(ctx)
 	log.Println("froniusmqtt beendet")

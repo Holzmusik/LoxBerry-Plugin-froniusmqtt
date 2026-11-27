@@ -37,6 +37,9 @@ externer `git clone` nötig):
 4. Optional (standardmäßig **deaktiviert**, siehe Warnung unten): abonniert
    `battery/cmd/hold` und `battery/cmd/release` -> schreibt eine
    Entladesperre über einen undokumentierten Fronius-Endpunkt
+5. Optional (ebenfalls standardmäßig **deaktiviert**): liest und setzt den
+   minimalen Ladezustand (`battery/state/soc_*`, `battery/cmd/soc_min`),
+   siehe "Min-SoC-Steuerung" unten
 
 Keine eigene Lastmanagement-/Automatisierungslogik - die bleibt vollständig
 in Loxone.
@@ -78,6 +81,13 @@ weil er auch `inverter/<id>/state/soc|battery_mode` liefert).
 <prefix>battery/cmd/hold                 (Entladesperre aktivieren, Payload beliebig)
 <prefix>battery/cmd/release              (Freigabe/Normalbetrieb, Payload beliebig)
 <prefix>battery/state/control_mode       (normal|hold, retained - Rückmeldung)
+
+# nur wenn Min-SoC-Steuerung aktiviert:
+<prefix>battery/cmd/soc_min              (minimaler Ladezustand in %, Ganzzahl)
+<prefix>battery/state/soc_min            (minimaler Ladezustand %, vom Gerät gelesen, retained)
+<prefix>battery/state/soc_max            (maximaler Ladezustand %, vom Gerät gelesen, retained)
+<prefix>battery/state/soc_mode           (manual|auto, retained)
+<prefix>battery/state/last_write         (Unix-Zeit des letzten erfolgreichen Schreibens, retained)
 ```
 
 `<id>` entspricht der von `GetActiveDeviceInfo.cgi` gemeldeten Geräte-ID
@@ -104,7 +114,11 @@ vom Go-Daemon direkt gelesen:
     "host": "",
     "poll_interval_seconds": 5,
     "http_timeout_seconds": 5,
-    "battery_control": { "enabled": false, "user": "customer", "password": "", "config_path": "auto" }
+    "battery_control": {
+      "enabled": false, "user": "customer", "password": "", "config_path": "auto",
+      "soc_limit": { "enabled": false, "min": 5, "max": 80,
+                     "write_interval_minutes": 10, "read_interval_minutes": 10 }
+    }
   },
   "mqtt": {
     "use_local_broker": true,
@@ -139,7 +153,8 @@ offizielles Fronius-API-Dokument.
   offiziell dokumentiert.
 - Digest-Auth: MD5 und SHA-256 (gegen die RFC-7616-Testvektoren geprüft).
   Die Challenge wird aus `WWW-Authenticate` oder `X-WWW-Authenticate`
-  gelesen. Gegen ein Gerät mit neuer Firmware ist das **nicht getestet**.
+  gelesen. Login mit SHA-256 und Benutzer `technician` an einem GEN24 mit
+  aktueller Firmware bestätigt.
 - Retained gesendete `battery/cmd/*`-Nachrichten werden ignoriert, sonst
   würde jeder Reconnect das Kommando erneut auslösen. Die Kommandos in
   Loxone also ohne Retain-Flag senden.
@@ -147,10 +162,50 @@ offizielles Fronius-API-Dokument.
   Aufruf aus (prüft die Digest-Zugangsdaten), schreibt nie. Ein
   tatsächlicher Schreibzugriff passiert ausschließlich über die MQTT-
   Kommando-Topics `battery/cmd/hold`/`battery/cmd/release`.
-- Für feingranulare Batterie-Steuerung (Lade-/Entladeraten-Limits, Reserve-
-  SOC) ist laut derselben Recherche **SunSpec Modbus TCP (Model 124,
-  "storage")** der robustere, vom Wechselrichter selbst offiziell
-  unterstützte Weg - dieses Plugin deckt das nicht ab.
+- Für feingranulare Batterie-Steuerung (Lade-/Entladeraten-Limits) ist laut
+  derselben Recherche **SunSpec Modbus TCP (Model 124, "storage")** der
+  robustere, vom Wechselrichter selbst offiziell unterstützte Weg - dieses
+  Plugin deckt das nicht ab.
+
+### Min-SoC-Steuerung (experimentell, standardmäßig deaktiviert)
+
+Liest und setzt "Minimaler Ladezustand" aus der Fronius-Weboberfläche
+(Batteriemanagement -> Einstellungen Ladezustand). Ebenfalls ein
+undokumentierter Endpunkt der Weboberfläche: `GET`/`POST
+/api/config/batteries` (ältere Firmware `/config/batteries`), gleiche
+Zugangsdaten wie oben, eigener Schalter. Body und Antwort sind an einem
+GEN24 per Browser-Entwicklertools mitgeschnitten - das Plugin schickt
+exakt, was auch die Weboberfläche schickt:
+
+```json
+{"BAT_M0_SOC_MIN": 28, "BAT_M0_SOC_MODE": "manual"}
+```
+
+Nur diese Felder werden geschrieben, die übrige Batterie-Konfiguration
+bleibt unverändert. Der Modus wird dabei auf "manual" gestellt, weil der
+Mindestwert sonst nicht gilt; damit gilt auch der eingestellte maximale
+Ladezustand. Die Antwort listet pro Feld `writeSuccess`, `writeFailure`,
+`validationErrors`, `permissionFailure` und `unknownNodes` - meldet das
+Gerät dort ein Problem, steht es im Log.
+
+- Welcher Wert sinnvoll ist, entscheidet Loxone (`battery/cmd/soc_min`).
+  Das Plugin verwirft Werte außerhalb der eingestellten Grenzen
+  (Standard 5-80 %), Nicht-Ganzzahlen und retained Nachrichten.
+- Geschrieben wird nur, wenn der Wert vom Gerätewert abweicht, und
+  höchstens einmal pro Mindestabstand (Standard 10 min, schont den Flash
+  des Wechselrichters). Ein in der Sperrzeit gesendeter Wert wird danach
+  nachgeholt, und zwar nur der jeweils letzte.
+- Nach jedem Schreiben liest das Plugin zurück und publiziert
+  `battery/state/soc_min` und `battery/state/last_write`. Sonst wird alle
+  10 min gelesen.
+- Ist der Wechselrichter beim Schreiben nicht erreichbar, wird nach dem
+  Mindestabstand erneut versucht. Meldet das Gerät einen Fehler, nicht.
+- Der Button "Batterie-Konfiguration lesen" in der Web-UI zeigt die erkannten
+  Werte und die Rohantwort (rein lesend). Die Rohantwort steht beim ersten
+  Lesen nach dem Dienststart außerdem einmal im Log.
+- Eine Notstrom-Reserve (nur sichtbar, wenn Notstrom/PV Point eingerichtet
+  ist) ist noch nicht eingebaut; das Feld wird nachgerüstet, sobald es an
+  einem Gerät mitgeschnitten ist.
 
 ## Build/Installation
 

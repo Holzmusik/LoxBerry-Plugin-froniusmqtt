@@ -24,10 +24,13 @@ type Bridge struct {
 	prefix string
 
 	poller *fronius.Poller
-	// battery ist nil, wenn fronius.battery_control.enabled=false - siehe
-	// config.BatteryControlConfig. Dann werden weder die battery/cmd/*-
-	// Topics abonniert noch battery/state/control_mode veroeffentlicht.
-	battery *fronius.BatteryController
+	// battery ist nil, wenn weder battery_control.enabled noch
+	// battery_control.soc_limit.enabled gesetzt ist. hold/release
+	// (battery/cmd/hold|release, state/control_mode) nur bei holdEnabled.
+	battery     *fronius.BatteryController
+	holdEnabled bool
+	// soc ist nil, wenn battery_control.soc_limit.enabled=false (siehe soc.go).
+	soc *socLimiter
 
 	// categoryFilter == nil bedeutet "alles publizieren" - siehe
 	// config.MQTTConfig.EnabledCategories.
@@ -53,14 +56,26 @@ func New(cfg *config.Config, poller *fronius.Poller, battery *fronius.BatteryCon
 			filter[cat] = true
 		}
 	}
-	return &Bridge{
+	b := &Bridge{
 		cfg:            cfg,
 		prefix:         cfg.MQTT.TopicPrefix,
 		poller:         poller,
 		battery:        battery,
+		holdEnabled:    battery != nil && cfg.Fronius.BatteryControl.Enabled,
 		categoryFilter: filter,
 		changes:        newChangeFilter(fullResyncInterval),
 	}
+	if sl := cfg.Fronius.BatteryControl.SocLimit; battery != nil && sl.Enabled {
+		b.soc = newSocLimiter(battery, sl.Min, sl.Max,
+			time.Duration(sl.WriteIntervalMinutes)*time.Minute,
+			time.Duration(sl.ReadIntervalMinutes)*time.Minute,
+			func(topic, value string) {
+				if b.client != nil {
+					b.client.Publish(b.prefix+topic, 0, true, value)
+				}
+			})
+	}
+	return b
 }
 
 // Connect baut die MQTT-Verbindung auf (mit LWT auf <prefix>bridge/status)
@@ -83,8 +98,12 @@ func (b *Bridge) Connect() error {
 		log.Printf("mqtt: verbunden (%s:%d)", b.cfg.MQTT.Host, b.cfg.MQTT.Port)
 		c.Publish(statusTopic, 1, true, "online")
 		b.resync.Store(true)
-		if b.battery != nil {
+		if b.holdEnabled {
 			b.subscribeBatteryCommands(c)
+		}
+		if b.soc != nil {
+			c.Subscribe(b.prefix+"battery/cmd/soc_min", 1, b.socCmdHandler)
+			b.soc.republish()
 		}
 	})
 	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
@@ -125,6 +144,16 @@ func (b *Bridge) batteryCmdHandler(hold bool) mqtt.MessageHandler {
 	}
 }
 
+func (b *Bridge) socCmdHandler(c mqtt.Client, msg mqtt.Message) {
+	// Retained verwerfen - wie bei hold/release (sonst bei jedem Reconnect
+	// erneut verarbeitet).
+	if msg.Retained() {
+		log.Print("bridge: retained battery/cmd/soc_min ignoriert - Kommandos bitte ohne Retain-Flag senden")
+		return
+	}
+	b.soc.submit(string(msg.Payload()))
+}
+
 // RunPollLoop blockiert bis ctx endet, fragt im konfigurierten Poll-Intervall
 // (siehe config.FroniusConfig.PollIntervalSeconds) den Poller ab und
 // veroeffentlicht geaenderte Werte retained (alle fullResyncInterval und
@@ -134,6 +163,9 @@ func (b *Bridge) RunPollLoop(ctx context.Context) {
 	interval := time.Duration(b.cfg.Fronius.PollIntervalSeconds) * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	if b.soc != nil {
+		go b.soc.run(ctx)
+	}
 
 	b.pollOnce()
 	for {

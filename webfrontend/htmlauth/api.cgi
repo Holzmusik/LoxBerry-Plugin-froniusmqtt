@@ -145,6 +145,10 @@ my %CONFIG_DEFAULTS = (
         host => '', poll_interval_seconds => 5, http_timeout_seconds => 5,
         battery_control => {
             enabled => JSON::PP::false, user => 'customer', password => '', config_path => 'auto',
+            soc_limit => {
+                enabled => JSON::PP::false, min => 5, max => 80,
+                write_interval_minutes => 10, read_interval_minutes => 10,
+            },
         },
     },
     mqtt => {
@@ -174,6 +178,7 @@ sub save_config {
     my %c = (%CONFIG_DEFAULTS, %$body);
     $c{fronius} = { %{ $CONFIG_DEFAULTS{fronius} }, %{ $body->{fronius} || {} } };
     $c{fronius}{battery_control} = { %{ $CONFIG_DEFAULTS{fronius}{battery_control} }, %{ $body->{fronius}{battery_control} || {} } };
+    $c{fronius}{battery_control}{soc_limit} = { %{ $CONFIG_DEFAULTS{fronius}{battery_control}{soc_limit} }, %{ $body->{fronius}{battery_control}{soc_limit} || {} } };
     $c{mqtt} = { %{ $CONFIG_DEFAULTS{mqtt} }, %{ $body->{mqtt} || {} } };
 
     # Bereits gespeicherte (verschluesselte) Werte laden - fuer "Feld leer
@@ -283,17 +288,19 @@ sub fronius_discover {
 # curl --digest - kann aber X-WWW-Authenticate (neuere Fronius-Firmware,
 # beim Nutzer bestaetigt) nicht auswerten und fragte zudem den falschen
 # Pfad ab.
-sub battery_test {
-    my ($host, $user, $password, $configured_path) = @_;
+# Gleicher Weg fuer "Batterie-Konfiguration lesen" ("froniusmqtt
+# battery-config", rein lesender GET auf .../config/batteries).
+sub battery_cmd {
+    my ($subcmd, $host, $user, $password, $configured_path) = @_;
     return { ok => JSON::PP::false, error => 'Host/Benutzername/Passwort fehlt' }
         unless length($host // '') && length($user // '') && length($password // '');
     my $in = JSON::PP->new->utf8->encode({
         host => $host, user => $user, password => $password, config_path => ($configured_path // 'auto'),
     });
-    my ($rc, $out) = run_capture_stdin([$FRONIUSMQTT_BIN, 'battery-test'], $in);
+    my ($rc, $out) = run_capture_stdin([$FRONIUSMQTT_BIN, $subcmd], $in);
     my $res = eval { JSON::PP->new->utf8->decode($out // '') };
     return $res if ref($res) eq 'HASH';
-    return { ok => JSON::PP::false, error => 'Login-Test fehlgeschlagen - ist der Dienst korrekt installiert? (' . ($out // '') . ')' };
+    return { ok => JSON::PP::false, error => 'Aufruf fehlgeschlagen - ist der Dienst korrekt installiert? (' . ($out // '') . ')' };
 }
 
 # -- Dispatch ------------------------------------------------------------
@@ -361,14 +368,14 @@ elsif ($action eq 'fronius_test') {
     my $host = length($body->{host} // '') ? $body->{host} : $cfg->{fronius}{host};
     out(fronius_discover($host));
 }
-elsif ($action eq 'battery_test') {
+elsif ($action eq 'battery_test' || $action eq 'battery_config') {
     my $body = read_json_body();
     my $cfg = load_config();
     my $host = length($body->{host} // '') ? $body->{host} : $cfg->{fronius}{host};
     my $user = length($body->{user} // '') ? $body->{user} : $cfg->{fronius}{battery_control}{user};
     my $password = length($body->{password} // '') ? $body->{password} : decrypt_secret($cfg->{fronius}{battery_control}{password});
     my $config_path = $body->{config_path} // $cfg->{fronius}{battery_control}{config_path};
-    out(battery_test($host, $user, $password, $config_path));
+    out(battery_cmd($action eq 'battery_test' ? 'battery-test' : 'battery-config', $host, $user, $password, $config_path));
 }
 elsif ($action eq 'service_status') {
     my $s = svc_status($SERVICE);

@@ -245,7 +245,8 @@ print <<'HTML';
       </div>
     </div>
     <div class="card">
-      <div class="checkfield"><div class="toggle toggle-danger" id="battery_enabled" onclick="toggleSwitch('battery_enabled')"></div><label onclick="toggleSwitch('battery_enabled')">Batterie-Control aktivieren</label></div>
+      <div class="checkfield"><div class="toggle toggle-danger" id="battery_enabled" onclick="toggleSwitch('battery_enabled')"></div><label onclick="toggleSwitch('battery_enabled')">Entladesperre (hold/release) aktivieren</label></div>
+      <div class="hint">Zugangsdaten und Endpunkt gelten auch für die Min-SoC-Steuerung unten. Fürs Schreiben ist in der Regel <span class="mono">technician</span> nötig.</div>
       <div class="row">
         <div class="field">
           <label>Benutzername (Fronius-Weboberfläche)</label>
@@ -270,6 +271,33 @@ print <<'HTML';
       </div>
       <span class="hint" id="battery-test-status"></span>
       <div class="hint">Der Testbutton führt NUR einen lesenden Aufruf aus, um die Zugangsdaten zu prüfen - es wird dabei nichts geschrieben/gesperrt. Die eigentliche Sperre/Freigabe löst ausschließlich ein MQTT-Kommando aus (siehe Loxone-Import-Seite), nie diese Web-UI.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Minimaler Ladezustand (Min-SoC)</div>
+      <div class="hint">
+        Liest und setzt den Wert "Minimaler Ladezustand" aus der Fronius-Weboberfläche
+        (<em>Batteriemanagement -&gt; Einstellungen Ladezustand</em>) über den ebenfalls
+        undokumentierten Endpunkt <span class="mono">/api/config/batteries</span>.
+        Unabhängig von der Entladesperre oben. Welcher Wert sinnvoll ist, entscheidet Loxone
+        (<span class="mono">battery/cmd/soc_min</span>, Ganzzahl in %) - das Plugin prüft nur
+        die Grenzen, schreibt nur bei Abweichung vom Gerätewert und höchstens einmal pro
+        Mindestabstand (schont den Flash des Wechselrichters; ein zwischendurch gesendeter
+        Wert wird danach nachgeholt). Beim Schreiben wird die Begrenzung auf "Manuell"
+        gestellt - dann gilt auch der dort eingestellte maximale Ladezustand.
+      </div>
+      <div class="checkfield"><div class="toggle toggle-danger" id="soc_enabled" onclick="toggleSwitch('soc_enabled')"></div><label onclick="toggleSwitch('soc_enabled')">Min-SoC-Steuerung aktivieren</label></div>
+      <div class="row">
+        <div class="field" style="max-width:160px"><label>Erlaubt ab (%)</label><input type="number" id="soc_min" min="0" max="100" data-role="none"></div>
+        <div class="field" style="max-width:160px"><label>Erlaubt bis (%)</label><input type="number" id="soc_max" min="0" max="100" data-role="none"></div>
+        <div class="field" style="max-width:220px"><label>Mindestabstand Schreiben (min)</label><input type="number" id="soc_write_interval" min="1" data-role="none"></div>
+        <div class="field" style="max-width:200px"><label>Lese-Intervall (min)</label><input type="number" id="soc_read_interval" min="1" data-role="none"></div>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-secondary" onclick="readBatteryConfig()">Batterie-Konfiguration lesen (nur lesend)</button>
+        <button class="btn btn-primary" onclick="saveConfig()">Speichern</button>
+      </div>
+      <span class="hint" id="battery-config-status"></span>
+      <pre class="log log-hidden" id="battery-config-raw"></pre>
     </div>
   </section>
 
@@ -538,6 +566,27 @@ async function testBattery() {
   toast(r.ok ? 'Batterie-Control-Login OK' : (r.error || 'Login fehlgeschlagen'), !!r.ok);
 }
 
+async function readBatteryConfig() {
+  const body = {
+    host: document.getElementById('fronius_host').value,
+    user: document.getElementById('battery_user').value,
+    password: document.getElementById('battery_password').value,
+    config_path: document.getElementById('battery_config_path').value,
+  };
+  const r = await api('battery_config', { method: 'POST', body });
+  const el = document.getElementById('battery-config-status');
+  const show = v => (v === undefined || v === null || v === '') ? 'nicht gefunden' : v;
+  el.textContent = r.ok
+    ? ('OK (' + r.path + '): minimaler Ladezustand ' + show(r.soc_min) + ' %, maximaler ' + show(r.soc_max) + ' %, Modus ' + show(r.soc_mode))
+    : ((r.error || 'Lesen fehlgeschlagen') + (r.path ? ' (' + r.path + ')' : ''));
+  const pre = document.getElementById('battery-config-raw');
+  let raw = r.raw || '';
+  try { raw = JSON.stringify(JSON.parse(raw), null, 2); } catch (e) { /* Rohtext anzeigen */ }
+  pre.textContent = raw;
+  pre.classList.toggle('log-hidden', !raw);
+  toast(r.ok ? 'Batterie-Konfiguration gelesen' : (r.error || 'Lesen fehlgeschlagen'), !!r.ok);
+}
+
 // -- Konfiguration laden/speichern -------------------------------
 function currentConfigForm() {
   return {
@@ -550,6 +599,13 @@ function currentConfigForm() {
         user: document.getElementById('battery_user').value,
         password: document.getElementById('battery_password').value,
         config_path: document.getElementById('battery_config_path').value,
+        soc_limit: {
+          enabled: isToggled('soc_enabled'),
+          min: parseInt(document.getElementById('soc_min').value || '5', 10),
+          max: parseInt(document.getElementById('soc_max').value || '80', 10),
+          write_interval_minutes: parseInt(document.getElementById('soc_write_interval').value || '10', 10),
+          read_interval_minutes: parseInt(document.getElementById('soc_read_interval').value || '10', 10),
+        },
       },
     },
     mqtt: {
@@ -577,6 +633,12 @@ function fillConfigForm(c) {
   document.getElementById('battery_password').value = '';
   document.getElementById('battery_password').placeholder = bc.password_set ? 'gespeichert - leer lassen zum Beibehalten' : '';
   document.getElementById('battery_config_path').value = bc.config_path || 'auto';
+  const sl = bc.soc_limit || {};
+  setToggled('soc_enabled', !!sl.enabled);
+  document.getElementById('soc_min').value = sl.min || 5;
+  document.getElementById('soc_max').value = sl.max || 80;
+  document.getElementById('soc_write_interval').value = sl.write_interval_minutes || 10;
+  document.getElementById('soc_read_interval').value = sl.read_interval_minutes || 10;
 
   const m = c.mqtt || {};
   setToggled('use_local_broker', m.use_local_broker !== false);
@@ -631,10 +693,26 @@ const STATE_CATALOG = {
   ],
 };
 
+// feature: 'hold' = Entladesperre, 'soc' = Min-SoC-Steuerung (jeweils nur
+// angezeigt, wenn auf der Batterie-Control-Seite aktiviert). value = was der
+// Virtuelle Ausgang sendet - <v> ist Loxones Platzhalter fuer den Analogwert.
 const COMMAND_CATALOG = [
-  { topic: 'battery/cmd/hold', label: 'Batterie-Entladung sperren', desc: 'Aktiviert die Entladesperre über den experimentellen Endpunkt (siehe Batterie-Control-Seite)' },
-  { topic: 'battery/cmd/release', label: 'Batterie-Entladung freigeben', desc: 'Hebt die Entladesperre wieder auf (Normalbetrieb)' },
+  { feature: 'hold', topic: 'battery/cmd/hold', value: '1', label: 'Batterie-Entladung sperren', desc: 'Aktiviert die Entladesperre über den experimentellen Endpunkt (siehe Batterie-Control-Seite)' },
+  { feature: 'hold', topic: 'battery/cmd/release', value: '1', label: 'Batterie-Entladung freigeben', desc: 'Hebt die Entladesperre wieder auf (Normalbetrieb)' },
+  { feature: 'soc', topic: 'battery/cmd/soc_min', value: '<v>', label: 'Minimaler Ladezustand setzen (%)', desc: 'Analoger Virtueller Ausgang, Ganzzahl in % innerhalb der Grenzen der Batterie-Control-Seite' },
 ];
+
+const BATTERY_STATE_CATALOG = [
+  ['hold', 'control_mode', 'Entladesperre (hold/normal, nach Kommando)'],
+  ['soc', 'soc_min', 'Minimaler Ladezustand (%, vom Gerät gelesen)'],
+  ['soc', 'soc_max', 'Maximaler Ladezustand (%, vom Gerät gelesen)'],
+  ['soc', 'soc_mode', 'Begrenzung des Ladezustands (manual/auto)'],
+  ['soc', 'last_write', 'Letzter erfolgreicher Min-SoC-Schreibvorgang (Unix-Zeit)'],
+];
+
+function batteryFeatureEnabled(feature) {
+  return isToggled(feature === 'hold' ? 'battery_enabled' : 'soc_enabled');
+}
 
 function httpName(topic) {
   return topic.replace(/[\/ %]/g, '_');
@@ -723,6 +801,9 @@ function renderLoxoneExport() {
      ['last_poll', 'Zeitpunkt des letzten erfolgreichen Polls (Unix-Zeit)']].forEach(([suffix, desc]) => {
       rows.push({ label: 'Bridge - ' + desc, topic: prefix + 'bridge/' + suffix, desc });
     });
+    BATTERY_STATE_CATALOG.filter(([feature]) => batteryFeatureEnabled(feature)).forEach(([, suffix, desc]) => {
+      rows.push({ label: 'Batterie - ' + desc, topic: prefix + 'battery/state/' + suffix, desc });
+    });
   }
 
   if (protocol === 'udp') {
@@ -737,10 +818,9 @@ function renderLoxoneExport() {
     ).join('');
   }
 
-  const batteryEnabled = isToggled('battery_enabled');
-  cmdBodyEl.innerHTML = !batteryEnabled ? '' : COMMAND_CATALOG.map(cmd => {
+  cmdBodyEl.innerHTML = COMMAND_CATALOG.filter(cmd => batteryFeatureEnabled(cmd.feature)).map(cmd => {
     const topic = prefix + cmd.topic;
-    return '<tr>' + roCell(cmd.label, cmd.desc) + roCell('publish ' + topic + ' 1') + '</tr>';
+    return '<tr>' + roCell(cmd.label, cmd.desc) + roCell('publish ' + topic + ' ' + cmd.value) + '</tr>';
   }).join('');
 }
 
