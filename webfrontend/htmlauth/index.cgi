@@ -289,7 +289,10 @@ print <<'HTML';
         publiziert werden, legst du auf der <strong>"Daten"</strong>-Seite fest.
         <code>&lt;prefix&gt;bridge/status</code> (online/offline) ist der
         Last-Will-Status des Dienstes selbst und erscheint deshalb nicht in
-        der Tabelle.
+        der Tabelle. <code>bridge/fronius_ok</code> und
+        <code>bridge/last_poll</code> stehen dagegen drin: Damit erkennt ein
+        Loxone-Watchdog, ob der Wechselrichter noch antwortet oder nur alte
+        retained Werte anliegen.
       </div>
       <div class="hint" id="loxone-devices-hint"></div>
       <div class="divider"></div>
@@ -710,6 +713,15 @@ function renderLoxoneExport() {
   addRows('storage', (LAST_DISCOVERY.storages || []).map(d => d.id));
   addRows('meter', (LAST_DISCOVERY.meters || []).map(d => d.id));
   addRows('site', [null]);
+  // Erreichbarkeit des Wechselrichters - fuer einen Loxone-Watchdog, damit
+  // stehengebliebene retained Werte erkennbar sind. Unabhaengig von den
+  // Kategorien, nur in der Gesamtansicht.
+  if (!filterCategory) {
+    [['fronius_ok', 'Wechselrichter erreichbar (1/0, nach jedem Poll-Zyklus)'],
+     ['last_poll', 'Zeitpunkt des letzten erfolgreichen Polls (Unix-Zeit)']].forEach(([suffix, desc]) => {
+      rows.push({ label: 'Bridge - ' + desc, topic: prefix + 'bridge/' + suffix, desc });
+    });
+  }
 
   if (protocol === 'udp') {
     theadEl.innerHTML = '<th>Bezeichnung</th><th>Befehlserkennung</th>';

@@ -7,7 +7,9 @@ package fronius
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -23,6 +25,16 @@ func NewClient(host string, timeout time.Duration) *Client {
 		baseURL: "http://" + host,
 		http:    &http.Client{Timeout: timeout},
 	}
+}
+
+// isConnError: true, wenn err ein Transportfehler ist (Verbindung
+// abgelehnt, Host nicht erreichbar, Timeout - auch beim Lesen des Bodys),
+// also der Wechselrichter gerade nicht antwortet. Fachliche Fehler (HTTP-
+// Status != 200, Fronius-Status-Code, kaputtes JSON) sind KEIN
+// Verbindungsfehler. *url.Error implementiert net.Error.
+func isConnError(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne)
 }
 
 // envelope ist die gemeinsame Huelle aller /solar_api/v1/-Endpunkte

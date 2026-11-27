@@ -71,6 +71,8 @@ weil er auch `inverter/<id>/state/soc|battery_mode` liefert).
 <prefix>site/state/battery_standby|backup_mode|mode
 
 <prefix>bridge/status                    (online/offline, Last-Will des Daemons selbst)
+<prefix>bridge/fronius_ok                (1/0, retained, nach jedem Poll-Zyklus: Wechselrichter erreichbar)
+<prefix>bridge/last_poll                 (Unix-Zeit des letzten erfolgreichen Zyklus, retained)
 
 # nur wenn Batterie-Control aktiviert:
 <prefix>battery/cmd/hold                 (Entladesperre aktivieren, Payload beliebig)
@@ -84,6 +86,12 @@ Fronius als JSON `null` liefert (z.B. `day_energy` direkt nach Mitternacht,
 bevor der erste Tageswert existiert), werden bewusst **nicht** publiziert
 statt fälschlich als `0` - retained MQTT behält ohnehin den letzten
 bekannten Wert.
+
+Ist der Wechselrichter nicht erreichbar (Timeout, Verbindung abgelehnt), bricht
+der Zyklus beim ersten Fehler ab, statt jeden weiteren Endpunkt in den
+HTTP-Timeout laufen zu lassen. `bridge/fronius_ok` wird dann `0`, und
+`bridge/last_poll` bleibt auf dem letzten erfolgreichen Zeitpunkt stehen.
+Im Log steht nur der Wechsel (weg / wieder da), nicht jeder Zyklus.
 
 ## Konfiguration (`config.json`)
 

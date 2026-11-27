@@ -1,6 +1,7 @@
 package fronius
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -101,10 +102,17 @@ func (p *Poller) devices() (*ActiveDeviceInfo, error) {
 // Kategorien (siehe NewPoller) werden uebersprungen: Common-/3P-Daten nur
 // fuer "inverter", Storage nur fuer "storage", Meter nur fuer "meter",
 // PowerFlow fuer "site" ODER "inverter" (liefert inverter/<id>/state/soc
-// und battery_mode). Ein fehlschlagender
-// Teil-Abruf (z.B. 3P-Daten auf einem Geraet ohne diesen Scope) bricht den
-// gesamten Zyklus NICHT ab, nur diese Werte fehlen dann fuer diesen Zyklus.
-func (p *Poller) Poll() []KV {
+// und battery_mode).
+//
+// Fehlerverhalten: Ein Netzwerkfehler (Wechselrichter nicht erreichbar,
+// Timeout - siehe isConnError) bricht den Zyklus SOFORT ab und wird
+// zurueckgegeben; ohne Abbruch wuerde jeder weitere Request erneut in den
+// HTTP-Timeout laufen (~5 Requests x http_timeout pro Zyklus). Ebenso ein
+// Discovery-Fehler. Ein fachlicher Fehler eines einzelnen Endpunkts (HTTP-
+// Status, Fronius-Status-Code, z.B. 3P-Daten auf einem Geraet ohne diesen
+// Scope) bricht den Zyklus NICHT ab, nur diese Werte fehlen dann. kv enthaelt
+// auch im Fehlerfall alle bis dahin gelesenen Werte.
+func (p *Poller) Poll() ([]KV, error) {
 	var kv []KV
 	wantInverter, wantStorage, wantMeter, wantSite :=
 		p.wants("inverter"), p.wants("storage"), p.wants("meter"), p.wants("site")
@@ -114,8 +122,7 @@ func (p *Poller) Poll() []KV {
 		var err error
 		info, err = p.devices()
 		if err != nil {
-			log.Printf("fronius: GetActiveDeviceInfo fehlgeschlagen: %v", err)
-			return kv
+			return kv, fmt.Errorf("GetActiveDeviceInfo: %w", err)
 		}
 	}
 
@@ -126,6 +133,10 @@ func (p *Poller) Poll() []KV {
 		base := "inverter/" + id + "/state/"
 
 		if common, err := p.client.GetCommonInverterData(id); err != nil {
+			if isConnError(err) {
+				p.invalidate()
+				return kv, fmt.Errorf("CommonInverterData(%s): %w", id, err)
+			}
 			log.Printf("fronius: CommonInverterData(%s) fehlgeschlagen: %v", id, err)
 			p.invalidate()
 		} else {
@@ -148,6 +159,10 @@ func (p *Poller) Poll() []KV {
 			continue
 		}
 		if threeP, err := p.client.Get3PInverterData(id); err != nil {
+			if isConnError(err) {
+				p.invalidate()
+				return kv, fmt.Errorf("3PInverterData(%s): %w", id, err)
+			}
 			// Manche (einphasige) Geraete unterstuetzen diesen Scope
 			// schlicht nicht - erwartbarer Regelfall. Bis zur naechsten
 			// Discovery nicht erneut versuchen, kein Log pro Zyklus.
@@ -165,6 +180,10 @@ func (p *Poller) Poll() []KV {
 
 	if wantStorage && len(info.Storage) > 0 {
 		if storages, err := p.client.GetStorageRealtimeData(); err != nil {
+			if isConnError(err) {
+				p.invalidate()
+				return kv, fmt.Errorf("GetStorageRealtimeData: %w", err)
+			}
 			log.Printf("fronius: GetStorageRealtimeData fehlgeschlagen: %v", err)
 			p.invalidate()
 		} else {
@@ -186,6 +205,10 @@ func (p *Poller) Poll() []KV {
 
 	if wantMeter && len(info.Meter) > 0 {
 		if meters, err := p.client.GetMeterRealtimeData(); err != nil {
+			if isConnError(err) {
+				p.invalidate()
+				return kv, fmt.Errorf("GetMeterRealtimeData: %w", err)
+			}
 			log.Printf("fronius: GetMeterRealtimeData fehlgeschlagen: %v", err)
 			p.invalidate()
 		} else {
@@ -215,9 +238,13 @@ func (p *Poller) Poll() []KV {
 	}
 
 	if !wantSite && !wantInverter {
-		return kv
+		return kv, nil
 	}
 	if pf, err := p.client.GetPowerFlowRealtimeData(); err != nil {
+		if isConnError(err) {
+			p.invalidate()
+			return kv, fmt.Errorf("GetPowerFlowRealtimeData: %w", err)
+		}
 		log.Printf("fronius: GetPowerFlowRealtimeData fehlgeschlagen: %v", err)
 	} else {
 		addFloat(&kv, "site/state/p_grid", pf.Site.PGrid)
@@ -236,7 +263,7 @@ func (p *Poller) Poll() []KV {
 		}
 	}
 
-	return kv
+	return kv, nil
 }
 
 func addFloat(kv *[]KV, topic string, v float64) {

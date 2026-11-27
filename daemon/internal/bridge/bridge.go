@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,10 @@ type Bridge struct {
 	// alles raus, falls der Broker zwischenzeitlich neu gestartet wurde.
 	changes *changeFilter
 	resync  atomic.Bool
+
+	// reach merkt den letzten Erreichbarkeitszustand des Wechselrichters
+	// fuer bridge/fronius_ok (siehe reachability).
+	reach reachability
 }
 
 func New(cfg *config.Config, poller *fronius.Poller, battery *fronius.BatteryController) *Bridge {
@@ -141,8 +146,13 @@ func (b *Bridge) pollOnce() {
 	if b.resync.Swap(false) {
 		b.changes.reset()
 	}
+	polled, err := b.poller.Poll()
+	now := time.Now()
+	if msg, changed := b.reach.update(err); changed {
+		log.Print(msg)
+	}
 	var selected []fronius.KV
-	for _, kv := range b.poller.Poll() {
+	for _, kv := range polled {
 		// Kategorie = erstes Topic-Segment ("inverter/1/state/pac" ->
 		// "inverter") - siehe poller.go fuer die Topic-Struktur. Der
 		// Poller laesst abgewaehlte Kategorien zwar schon weg, PowerFlow
@@ -155,8 +165,19 @@ func (b *Bridge) pollOnce() {
 		}
 		selected = append(selected, kv)
 	}
-	for _, kv := range b.changes.filter(selected, time.Now()) {
+	// bridge/* laufen bewusst NICHT durch changes: last_poll aendert sich
+	// ohnehin jeden erfolgreichen Zyklus, fronius_ok soll ein Loxone-
+	// Watchdog auch ohne Wechsel regelmaessig sehen.
+	ok := "1"
+	if err != nil {
+		ok = "0"
+	}
+	for _, kv := range b.changes.filter(selected, now) {
 		b.client.Publish(b.prefix+kv.Topic, 0, true, kv.Value)
+	}
+	b.client.Publish(b.prefix+"bridge/fronius_ok", 0, true, ok)
+	if err == nil {
+		b.client.Publish(b.prefix+"bridge/last_poll", 0, true, strconv.FormatInt(now.Unix(), 10))
 	}
 }
 

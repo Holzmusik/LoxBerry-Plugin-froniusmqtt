@@ -2,6 +2,10 @@ package fronius
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -89,7 +93,7 @@ func topicCategories(kv []KV) []string {
 func TestPollAllCategoriesWhenNil(t *testing.T) {
 	f := newFakeAPI()
 	p := newPoller(f, nil)
-	kv := p.Poll()
+	kv, _ := p.Poll()
 	for _, ep := range []string{"discovery", "common", "3p", "storage", "meter", "powerflow"} {
 		if f.calls[ep] != 1 {
 			t.Errorf("%s: %d Aufrufe, erwartet 1", ep, f.calls[ep])
@@ -142,7 +146,7 @@ func TestPollOnlySiteSkipsDiscovery(t *testing.T) {
 func TestPollEmptyListFetchesNothing(t *testing.T) {
 	f := newFakeAPI()
 	p := newPoller(f, []string{})
-	if kv := p.Poll(); len(kv) != 0 {
+	if kv, _ := p.Poll(); len(kv) != 0 {
 		t.Errorf("leere Positivliste lieferte %d Werte", len(kv))
 	}
 	for ep, n := range f.calls {
@@ -184,7 +188,8 @@ func TestDecimalsFor(t *testing.T) {
 func TestPollRoundsValues(t *testing.T) {
 	p := newPoller(newFakeAPI(), []string{"inverter", "storage"})
 	got := map[string]string{}
-	for _, e := range p.Poll() {
+	polled, _ := p.Poll()
+	for _, e := range polled {
 		got[e.Topic] = e.Value
 	}
 	want := map[string]string{
@@ -250,12 +255,12 @@ func TestDiscoveryErrorRetriedNextCycle(t *testing.T) {
 	f := newFakeAPI()
 	p, clk := newTestPoller(f, nil)
 	f.err["discovery"] = errTest
-	if kv := p.Poll(); len(kv) != 0 {
+	if kv, _ := p.Poll(); len(kv) != 0 {
 		t.Fatalf("Discovery-Fehler lieferte trotzdem %d Werte", len(kv))
 	}
 	delete(f.err, "discovery")
 	clk.t = clk.t.Add(5 * time.Second)
-	if kv := p.Poll(); len(kv) == 0 {
+	if kv, _ := p.Poll(); len(kv) == 0 {
 		t.Fatalf("nach behobenem Discovery-Fehler keine Werte")
 	}
 	if f.calls["discovery"] != 2 {
@@ -282,5 +287,86 @@ func Test3PUnsupportedRememberedUntilRediscovery(t *testing.T) {
 	p.Poll()
 	if f.calls["3p"] != 2 {
 		t.Fatalf("3p nach neuer Discovery: %d Aufrufe, erwartet 2", f.calls["3p"])
+	}
+}
+
+// connErr bildet einen Transportfehler so nach, wie client.get ihn liefert
+// (*url.Error, in fmt.Errorf("GET ...: %w") verpackt).
+var connErr = fmt.Errorf("GET /x: %w", &url.Error{Op: "Get", URL: "http://wr/x", Err: errors.New("connection refused")})
+
+func TestConnErrorAbortsCycle(t *testing.T) {
+	f := newFakeAPI()
+	p, clk := newTestPoller(f, nil)
+	p.Poll()
+	f.err["common"] = connErr
+	clk.t = clk.t.Add(5 * time.Second)
+	_, err := p.Poll()
+	if err == nil {
+		t.Fatal("Verbindungsfehler nicht zurueckgegeben")
+	}
+	for _, ep := range []string{"3p", "storage", "meter", "powerflow"} {
+		if f.calls[ep] != 1 {
+			t.Errorf("%s nach Verbindungsfehler noch abgefragt (%d Aufrufe, erwartet 1)", ep, f.calls[ep])
+		}
+	}
+	delete(f.err, "common")
+	clk.t = clk.t.Add(5 * time.Second)
+	if _, err := p.Poll(); err != nil {
+		t.Fatalf("nach Wiederkehr: %v", err)
+	}
+	if f.calls["discovery"] != 2 {
+		t.Errorf("discovery: %d Aufrufe, erwartet 2 (Neuermittlung nach Verbindungsfehler)", f.calls["discovery"])
+	}
+}
+
+func TestConnErrorOn3PDoesNotMarkUnsupported(t *testing.T) {
+	f := newFakeAPI()
+	p, clk := newTestPoller(f, nil)
+	f.err["3p"] = connErr
+	p.Poll()
+	delete(f.err, "3p")
+	clk.t = clk.t.Add(5 * time.Second)
+	p.Poll()
+	if f.calls["3p"] != 2 {
+		t.Fatalf("3p: %d Aufrufe, erwartet 2 - Timeout darf nicht als 'nicht unterstuetzt' gelten", f.calls["3p"])
+	}
+}
+
+func TestEndpointErrorDoesNotAbort(t *testing.T) {
+	f := newFakeAPI()
+	p, _ := newTestPoller(f, nil)
+	f.err["meter"] = errors.New("GET /x: HTTP 500")
+	kv, err := p.Poll()
+	if err != nil {
+		t.Fatalf("fachlicher Fehler brach Zyklus ab: %v", err)
+	}
+	if f.calls["powerflow"] != 1 || len(kv) == 0 {
+		t.Fatalf("Zyklus nicht fortgesetzt (powerflow=%d, %d Werte)", f.calls["powerflow"], len(kv))
+	}
+}
+
+func TestDiscoveryErrorReturned(t *testing.T) {
+	f := newFakeAPI()
+	p, _ := newTestPoller(f, nil)
+	f.err["discovery"] = errors.New("Fronius meldet Status 11")
+	if _, err := p.Poll(); err == nil {
+		t.Fatal("Discovery-Fehler nicht zurueckgegeben")
+	}
+}
+
+// Gegen den echten Client: Transportfehler vs. HTTP-Fehler.
+func TestIsConnErrorWithRealClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	c := NewClient(srv.Listener.Addr().String(), 2*time.Second)
+	_, err := c.GetActiveDeviceInfo()
+	if err == nil || isConnError(err) {
+		t.Fatalf("HTTP 500 als Verbindungsfehler gewertet: %v", err)
+	}
+	srv.Close()
+	_, err = c.GetActiveDeviceInfo()
+	if err == nil || !isConnError(err) {
+		t.Fatalf("geschlossener Port nicht als Verbindungsfehler erkannt: %v", err)
 	}
 }
