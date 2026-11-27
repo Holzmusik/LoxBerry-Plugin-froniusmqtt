@@ -73,7 +73,7 @@ func main() {
 	defer stop()
 
 	client := fronius.NewClient(cfg.Fronius.Host, time.Duration(cfg.Fronius.HTTPTimeoutSeconds)*time.Second)
-	poller := fronius.NewPoller(client)
+	poller := fronius.NewPoller(client, cfg.MQTT.EnabledCategories)
 
 	var battery *fronius.BatteryController
 	if cfg.Fronius.BatteryControl.Enabled {

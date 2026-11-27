@@ -217,7 +217,8 @@ print <<'HTML';
       <div class="hint" style="margin-bottom:10px">
         Fronius liefert deutlich weniger Werte als z.B. eine Easee-Wallbox -
         hier reicht eine Auswahl pro Kategorie statt einer langen
-        Einzelwert-Liste.
+        Einzelwert-Liste. Abgewählte Kategorien werden auch nicht mehr vom
+        Wechselrichter abgefragt (weniger HTTP-Last auf dem Gerät).
       </div>
       <div class="cat-group" id="cat-groups"></div>
       <div class="btn-group">

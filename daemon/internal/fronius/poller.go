@@ -13,31 +13,77 @@ type KV struct {
 	Value string
 }
 
-type Poller struct {
-	client *Client
+// api ist der Ausschnitt von *Client, den der Poller braucht - als
+// Interface, damit poller_test.go einen Fake einsetzen kann.
+type api interface {
+	GetActiveDeviceInfo() (*ActiveDeviceInfo, error)
+	GetCommonInverterData(deviceID string) (*CommonInverterData, error)
+	Get3PInverterData(deviceID string) (*ThreePInverterData, error)
+	GetStorageRealtimeData() (map[string]StorageController, error)
+	GetMeterRealtimeData() (map[string]MeterData, error)
+	GetPowerFlowRealtimeData() (*PowerFlow, error)
 }
 
-func NewPoller(client *Client) *Poller {
-	return &Poller{client: client}
+type Poller struct {
+	client api
+	// categories == nil bedeutet "alle Kategorien abfragen" - gleiche
+	// Nil-Semantik wie config.MQTTConfig.EnabledCategories.
+	categories map[string]bool
+}
+
+// NewPoller: categories ist die Positivliste aus
+// config.MQTTConfig.EnabledCategories (nil = alles). Endpunkte, deren Werte
+// ausschliesslich in abgewaehlten Kategorien landen, werden gar nicht erst
+// abgefragt - das entlastet den Wechselrichter, nicht nur den Broker.
+func NewPoller(client *Client, categories []string) *Poller {
+	return newPoller(client, categories)
+}
+
+func newPoller(client api, categories []string) *Poller {
+	p := &Poller{client: client}
+	if categories != nil {
+		p.categories = make(map[string]bool, len(categories))
+		for _, c := range categories {
+			p.categories[c] = true
+		}
+	}
+	return p
+}
+
+func (p *Poller) wants(category string) bool {
+	return p.categories == nil || p.categories[category]
 }
 
 // Poll fuehrt einen vollstaendigen Abfragezyklus durch: Discovery
 // (GetActiveDeviceInfo, siehe client.go) gefolgt von den Detail-Endpunkten
 // fuer jedes gefundene Geraet. Die Discovery laeuft bei JEDEM Zyklus neu
 // (nicht nur beim Start) - damit ein spaeter zusaetzlich angeschlossenes
-// Geraet automatisch ohne Neustart des Diensts erscheint. Ein fehlschlagender
+// Geraet automatisch ohne Neustart des Diensts erscheint. Abgewaehlte
+// Kategorien (siehe NewPoller) werden uebersprungen: Common-/3P-Daten nur
+// fuer "inverter", Storage nur fuer "storage", Meter nur fuer "meter",
+// PowerFlow fuer "site" ODER "inverter" (liefert inverter/<id>/state/soc
+// und battery_mode). Ein fehlschlagender
 // Teil-Abruf (z.B. 3P-Daten auf einem Geraet ohne diesen Scope) bricht den
 // gesamten Zyklus NICHT ab, nur diese Werte fehlen dann fuer diesen Zyklus.
 func (p *Poller) Poll() []KV {
 	var kv []KV
+	wantInverter, wantStorage, wantMeter, wantSite :=
+		p.wants("inverter"), p.wants("storage"), p.wants("meter"), p.wants("site")
 
-	info, err := p.client.GetActiveDeviceInfo()
-	if err != nil {
-		log.Printf("fronius: GetActiveDeviceInfo fehlgeschlagen: %v", err)
-		return kv
+	info := &ActiveDeviceInfo{}
+	if wantInverter || wantStorage || wantMeter {
+		var err error
+		info, err = p.client.GetActiveDeviceInfo()
+		if err != nil {
+			log.Printf("fronius: GetActiveDeviceInfo fehlgeschlagen: %v", err)
+			return kv
+		}
 	}
 
 	for id := range info.Inverter {
+		if !wantInverter {
+			break
+		}
 		base := "inverter/" + id + "/state/"
 
 		if common, err := p.client.GetCommonInverterData(id); err != nil {
@@ -73,7 +119,7 @@ func (p *Poller) Poll() []KV {
 		}
 	}
 
-	if len(info.Storage) > 0 {
+	if wantStorage && len(info.Storage) > 0 {
 		if storages, err := p.client.GetStorageRealtimeData(); err != nil {
 			log.Printf("fronius: GetStorageRealtimeData fehlgeschlagen: %v", err)
 		} else {
@@ -93,7 +139,7 @@ func (p *Poller) Poll() []KV {
 		}
 	}
 
-	if len(info.Meter) > 0 {
+	if wantMeter && len(info.Meter) > 0 {
 		if meters, err := p.client.GetMeterRealtimeData(); err != nil {
 			log.Printf("fronius: GetMeterRealtimeData fehlgeschlagen: %v", err)
 		} else {
@@ -122,6 +168,9 @@ func (p *Poller) Poll() []KV {
 		}
 	}
 
+	if !wantSite && !wantInverter {
+		return kv
+	}
 	if pf, err := p.client.GetPowerFlowRealtimeData(); err != nil {
 		log.Printf("fronius: GetPowerFlowRealtimeData fehlgeschlagen: %v", err)
 	} else {

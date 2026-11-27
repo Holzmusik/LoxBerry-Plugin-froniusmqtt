@@ -38,6 +38,9 @@ in Loxone.
 
 Präfix konfigurierbar (Default `fronius/`). Kategorien (Wechselrichter/
 Speicher/Zähler/Anlage) einzeln in der Web-UI ("Daten"-Seite) ab-/anwählbar.
+Abgewählte Kategorien werden gar nicht erst vom Wechselrichter abgefragt
+(PowerFlow läuft weiter, solange "Anlage" oder "Wechselrichter" aktiv ist,
+weil er auch `inverter/<id>/state/soc|battery_mode` liefert).
 
 ```
 <prefix>inverter/<id>/state/pac|sac|iac|uac|fac|idc|udc
