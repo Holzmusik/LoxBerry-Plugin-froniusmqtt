@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -30,6 +31,13 @@ type Bridge struct {
 	// categoryFilter == nil bedeutet "alles publizieren" - siehe
 	// config.MQTTConfig.EnabledCategories.
 	categoryFilter map[string]bool
+
+	// changes: nur geaenderte Werte publizieren (siehe change.go).
+	// resync wird vom MQTT-OnConnect-Handler (paho-Goroutine) gesetzt und
+	// von der Poll-Schleife verbraucht - nach einem Reconnect geht einmal
+	// alles raus, falls der Broker zwischenzeitlich neu gestartet wurde.
+	changes *changeFilter
+	resync  atomic.Bool
 }
 
 func New(cfg *config.Config, poller *fronius.Poller, battery *fronius.BatteryController) *Bridge {
@@ -46,6 +54,7 @@ func New(cfg *config.Config, poller *fronius.Poller, battery *fronius.BatteryCon
 		poller:         poller,
 		battery:        battery,
 		categoryFilter: filter,
+		changes:        newChangeFilter(fullResyncInterval),
 	}
 }
 
@@ -68,6 +77,7 @@ func (b *Bridge) Connect() error {
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Printf("mqtt: verbunden (%s:%d)", b.cfg.MQTT.Host, b.cfg.MQTT.Port)
 		c.Publish(statusTopic, 1, true, "online")
+		b.resync.Store(true)
 		if b.battery != nil {
 			b.subscribeBatteryCommands(c)
 		}
@@ -105,7 +115,8 @@ func (b *Bridge) batteryCmdHandler(hold bool) mqtt.MessageHandler {
 
 // RunPollLoop blockiert bis ctx endet, fragt im konfigurierten Poll-Intervall
 // (siehe config.FroniusConfig.PollIntervalSeconds) den Poller ab und
-// veroeffentlicht jedes Ergebnis retained. Erster Poll laeuft sofort (kein
+// veroeffentlicht geaenderte Werte retained (alle fullResyncInterval und
+// nach jedem MQTT-Reconnect alle Werte). Erster Poll laeuft sofort (kein
 // Warten auf das erste Ticker-Intervall).
 func (b *Bridge) RunPollLoop(ctx context.Context) {
 	interval := time.Duration(b.cfg.Fronius.PollIntervalSeconds) * time.Second
@@ -127,15 +138,24 @@ func (b *Bridge) pollOnce() {
 	if b.client == nil || !b.client.IsConnected() {
 		return
 	}
+	if b.resync.Swap(false) {
+		b.changes.reset()
+	}
+	var selected []fronius.KV
 	for _, kv := range b.poller.Poll() {
 		// Kategorie = erstes Topic-Segment ("inverter/1/state/pac" ->
-		// "inverter") - siehe poller.go fuer die Topic-Struktur.
+		// "inverter") - siehe poller.go fuer die Topic-Struktur. Der
+		// Poller laesst abgewaehlte Kategorien zwar schon weg, PowerFlow
+		// liefert aber "site" und "inverter" gemeinsam.
 		if b.categoryFilter != nil {
 			category, _, _ := strings.Cut(kv.Topic, "/")
 			if !b.categoryFilter[category] {
 				continue
 			}
 		}
+		selected = append(selected, kv)
+	}
+	for _, kv := range b.changes.filter(selected, time.Now()) {
 		b.client.Publish(b.prefix+kv.Topic, 0, true, kv.Value)
 	}
 }

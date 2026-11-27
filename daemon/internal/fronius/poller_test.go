@@ -150,3 +150,51 @@ func TestPollEmptyListFetchesNothing(t *testing.T) {
 }
 
 var errTest = errors.New("test")
+
+func TestDecimalsFor(t *testing.T) {
+	cases := map[string]int{
+		"inverter/1/state/pac":                0,
+		"inverter/1/state/total_energy":       0,
+		"inverter/1/state/udc":                1,
+		"inverter/1/state/uac_l2":             1,
+		"inverter/1/state/idc":                2,
+		"inverter/1/state/iac_l1":             2,
+		"inverter/1/state/fac":                2,
+		"inverter/1/state/soc":                1,
+		"storage/0/state/temperature":         1,
+		"storage/0/state/current_dc":          2,
+		"storage/0/state/voltage_dc":          1,
+		"storage/0/state/capacity_max":        0,
+		"meter/0/state/power_l1":              0,
+		"meter/0/state/power_factor_sum":      2,
+		"meter/0/state/energy_consumed":       0,
+		"meter/0/state/frequency":             2,
+		"site/state/p_grid":                   0,
+		"site/state/rel_selfconsumption":      1,
+		"storage/0/state/status_battery_cell": 0,
+	}
+	for topic, want := range cases {
+		if got := decimalsFor(topic); got != want {
+			t.Errorf("decimalsFor(%s) = %d, erwartet %d", topic, got, want)
+		}
+	}
+}
+
+func TestPollRoundsValues(t *testing.T) {
+	p := newPoller(newFakeAPI(), []string{"inverter", "storage"})
+	got := map[string]string{}
+	for _, e := range p.Poll() {
+		got[e.Topic] = e.Value
+	}
+	want := map[string]string{
+		"inverter/1/state/idc":        "1.23",
+		"inverter/1/state/udc":        "612.3",
+		"storage/0/state/temperature": "21.6",
+		"inverter/1/state/soc":        "55.0",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, erwartet %q", k, got[k], v)
+		}
+	}
+}

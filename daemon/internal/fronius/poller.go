@@ -3,6 +3,7 @@ package fronius
 import (
 	"log"
 	"strconv"
+	"strings"
 )
 
 // KV ist ein einzelner MQTT-State-Topic/Wert-Fund eines Poll-Zyklus - die
@@ -194,7 +195,34 @@ func (p *Poller) Poll() []KV {
 }
 
 func addFloat(kv *[]KV, topic string, v float64) {
-	*kv = append(*kv, KV{Topic: topic, Value: strconv.FormatFloat(v, 'f', 3, 64)})
+	*kv = append(*kv, KV{Topic: topic, Value: strconv.FormatFloat(v, 'f', decimalsFor(topic), 64)})
+}
+
+// decimalsFor waehlt die Nachkommastellen nach physikalischer Groesse (letztes
+// Topic-Segment). Pauschal 3 Stellen liessen Messrauschen (z.B. 230.412 ->
+// 230.407 V) bei jedem Zyklus als "Aenderung" durchschlagen - und damit die
+// Nur-bei-Aenderung-Logik der Bridge (siehe bridge.changeFilter) leerlaufen.
+// Genauer als der Fronius-Messwert sinnvoll aufloest, wird nichts
+// abgeschnitten: W/Wh ganzzahlig, V/%/°C 1 Stelle, A/Hz/cos-phi 2 Stellen.
+func decimalsFor(topic string) int {
+	name := topic[strings.LastIndex(topic, "/")+1:]
+	switch {
+	case name == "power_factor_sum":
+		return 2
+	case strings.Contains(name, "energy"),
+		strings.HasPrefix(name, "power_"), strings.HasPrefix(name, "p_"),
+		name == "pac", name == "sac",
+		strings.HasPrefix(name, "capacity"), name == "designed_capacity",
+		name == "status_battery_cell", name == "meter_location":
+		return 0
+	case strings.HasPrefix(name, "uac"), name == "udc", strings.HasPrefix(name, "voltage"),
+		name == "soc", name == "temperature", strings.HasPrefix(name, "rel_"):
+		return 1
+	case strings.HasPrefix(name, "iac"), name == "idc", strings.HasPrefix(name, "current"),
+		name == "fac", name == "frequency":
+		return 2
+	}
+	return 3
 }
 
 // addFloatPtr veroeffentlicht das Topic bewusst GAR NICHT, wenn v nil ist

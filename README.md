@@ -26,7 +26,11 @@ externer `git clone` nötig):
 2. Ruft für jedes gefundene Gerät die passenden Detail-Endpunkte ab
    (`GetInverterRealtimeData.cgi`, `GetStorageRealtimeData.cgi`,
    `GetMeterRealtimeData.cgi`, `GetPowerFlowRealtimeData.fcgi`)
-3. Übersetzt jedes Feld 1:1 -> retained MQTT-State-Topic
+3. Übersetzt jedes Feld 1:1 -> retained MQTT-State-Topic, publiziert aber
+   **nur geänderte Werte**. Alle 5 Minuten und nach jedem MQTT-Reconnect
+   gehen einmal alle Topics raus. Gerundet wird nach Größe: W/Wh ganzzahlig,
+   V/%/°C auf 1 Stelle, A/Hz/cos φ auf 2 Stellen, damit Messrauschen
+   keine Dauer-Änderungen erzeugt.
 4. Optional (standardmäßig **deaktiviert**, siehe Warnung unten): abonniert
    `battery/cmd/hold` und `battery/cmd/release` -> schreibt eine
    Entladesperre über einen undokumentierten Fronius-Endpunkt
