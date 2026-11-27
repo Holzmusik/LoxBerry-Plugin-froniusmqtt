@@ -109,6 +109,13 @@ func (b *Bridge) batteryCmdHandler(hold bool) mqtt.MessageHandler {
 		label, mode = "hold", "hold"
 	}
 	return func(c mqtt.Client, msg mqtt.Message) {
+		// Retained-Kommandos verwerfen: ein (versehentlich) retained
+		// gesendetes hold/release wuerde sonst bei JEDEM Reconnect des
+		// Diensts erneut in den Wechselrichter geschrieben.
+		if msg.Retained() {
+			log.Printf("bridge: retained battery/cmd/%s ignoriert - Kommandos bitte ohne Retain-Flag senden", label)
+			return
+		}
 		if err := b.battery.SetHold(hold); err != nil {
 			log.Printf("bridge: battery/%s fehlgeschlagen: %v", label, err)
 			return

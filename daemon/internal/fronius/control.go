@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -110,8 +111,12 @@ func (b *BatteryController) SetHold(hold bool) error {
 
 // --- HTTP Digest Auth (RFC 2617/7616), minimale eigene Implementierung ----
 // Bewusst ohne zusaetzliche Go-Abhaengigkeit (anders als EaseeMQTTs SignalR-
-// Client, der eine externe Bibliothek braucht) - nur MD5/qop=auth wird
-// unterstuetzt, das ist alles, was Fronius' Web-UI-Login verlangt.
+// Client, der eine externe Bibliothek braucht). Unterstuetzt: algorithm MD5
+// (Default) und SHA-256 (neuere GEN24-Firmware), qop=auth oder ohne qop.
+// NICHT unterstuetzt: *-sess-Varianten und qop=auth-int (Body-Hash) - die
+// fuehren zu einer klaren Fehlermeldung statt zu einem stillen 401.
+// SHA-256 ist gegen die RFC-7616-Testvektoren geprueft (control_test.go),
+// aber NICHT gegen ein echtes Geraet mit neuer Firmware.
 
 var challengeParamRe = regexp.MustCompile(`(\w+)=("[^"]*"|[^,]+)`)
 
@@ -119,7 +124,7 @@ func parseDigestChallenge(header string) map[string]string {
 	out := map[string]string{}
 	for _, m := range challengeParamRe.FindAllStringSubmatch(header, -1) {
 		key := m[1]
-		val := strings.Trim(m[2], `"`)
+		val := strings.Trim(strings.TrimSpace(m[2]), `"`)
 		out[key] = val
 	}
 	return out
@@ -128,6 +133,78 @@ func parseDigestChallenge(header string) map[string]string {
 func md5hex(s string) string {
 	sum := md5.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+func sha256hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// digestHashFor: "SHA-256" und die vereinzelt gesehene Schreibweise
+// "SHA256" werden gleich behandelt, Gross-/Kleinschreibung egal.
+func digestHashFor(algorithm string) (func(string) string, error) {
+	switch strings.ToUpper(strings.ReplaceAll(algorithm, "-", "")) {
+	case "", "MD5":
+		return md5hex, nil
+	case "SHA256":
+		return sha256hex, nil
+	}
+	return nil, fmt.Errorf("Digest-Algorithmus %q wird nicht unterstuetzt", algorithm)
+}
+
+// digestQop waehlt aus der Challenge-Liste (z.B. "auth, auth-int") "auth".
+// "" = Server verlangt kein qop (RFC-2069-Form).
+func digestQop(offered string) (string, error) {
+	if strings.TrimSpace(offered) == "" {
+		return "", nil
+	}
+	for _, q := range strings.Split(offered, ",") {
+		if strings.TrimSpace(q) == "auth" {
+			return "auth", nil
+		}
+	}
+	return "", fmt.Errorf("Digest-qop %q wird nicht unterstuetzt (nur auth)", offered)
+}
+
+// digestAuthorization baut den Authorization-Header fuer eine geparste
+// Challenge. cnonce wird uebergeben (statt intern erzeugt), damit die
+// RFC-7616-Testvektoren nachrechenbar sind.
+func digestAuthorization(ch map[string]string, user, password, method, uri, cnonce string) (string, error) {
+	realm, nonce, opaque, algorithm := ch["realm"], ch["nonce"], ch["opaque"], ch["algorithm"]
+	if realm == "" || nonce == "" {
+		return "", fmt.Errorf("Digest-Challenge ohne realm/nonce")
+	}
+	h, err := digestHashFor(algorithm)
+	if err != nil {
+		return "", err
+	}
+	qop, err := digestQop(ch["qop"])
+	if err != nil {
+		return "", err
+	}
+	ha1 := h(user + ":" + realm + ":" + password)
+	ha2 := h(method + ":" + uri)
+	nc := "00000001"
+
+	var authHeader string
+	if qop != "" {
+		response := h(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
+		authHeader = fmt.Sprintf(
+			`Digest username="%s", realm="%s", nonce="%s", uri="%s", qop=%s, nc=%s, cnonce="%s", response="%s"`,
+			user, realm, nonce, uri, qop, nc, cnonce, response)
+	} else {
+		response := h(ha1 + ":" + nonce + ":" + ha2)
+		authHeader = fmt.Sprintf(
+			`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s"`,
+			user, realm, nonce, uri, response)
+	}
+	if algorithm != "" {
+		authHeader += ", algorithm=" + algorithm
+	}
+	if opaque != "" {
+		authHeader += fmt.Sprintf(`, opaque="%s"`, opaque)
+	}
+	return authHeader, nil
 }
 
 func randomHex(n int) string {
@@ -153,41 +230,28 @@ func (b *BatteryController) digestRequest(method, path string, body []byte) (int
 	if err != nil {
 		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
+	// Neuere Fronius-Firmware schickt die Challenge (nach Community-
+	// Berichten, nicht selbst verifiziert) in X-WWW-Authenticate, damit der
+	// Browser keinen eigenen Login-Dialog oeffnet - beide pruefen.
 	challengeHeader := resp.Header.Get("WWW-Authenticate")
+	if challengeHeader == "" {
+		challengeHeader = resp.Header.Get("X-WWW-Authenticate")
+	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusUnauthorized || challengeHeader == "" {
+	if resp.StatusCode != http.StatusUnauthorized {
 		// Geraet verlangt (in diesem Aufbau) keine Auth, oder ein anderer
 		// Fehler ist aufgetreten - Antwort unveraendert durchreichen.
 		return resp.StatusCode, nil, nil
 	}
-
-	ch := parseDigestChallenge(challengeHeader)
-	realm, nonce, qop, opaque := ch["realm"], ch["nonce"], ch["qop"], ch["opaque"]
-	if realm == "" || nonce == "" {
-		return 0, nil, fmt.Errorf("%s %s: unerwartete WWW-Authenticate-Antwort: %q", method, path, challengeHeader)
+	if challengeHeader == "" {
+		return 0, nil, fmt.Errorf("%s %s: HTTP 401 ohne Digest-Challenge (weder WWW-Authenticate noch X-WWW-Authenticate)", method, path)
 	}
 
-	ha1 := md5hex(b.user + ":" + realm + ":" + b.password)
-	ha2 := md5hex(method + ":" + path)
-	nc := "00000001"
-	cnonce := randomHex(8)
-
-	var response, authHeader string
-	if qop == "auth" || qop == "auth-int" {
-		response = md5hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
-		authHeader = fmt.Sprintf(
-			`Digest username="%s", realm="%s", nonce="%s", uri="%s", qop=%s, nc=%s, cnonce="%s", response="%s"`,
-			b.user, realm, nonce, path, qop, nc, cnonce, response)
-	} else {
-		response = md5hex(ha1 + ":" + nonce + ":" + ha2)
-		authHeader = fmt.Sprintf(
-			`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s"`,
-			b.user, realm, nonce, path, response)
-	}
-	if opaque != "" {
-		authHeader += fmt.Sprintf(`, opaque="%s"`, opaque)
+	authHeader, err := digestAuthorization(parseDigestChallenge(challengeHeader), b.user, b.password, method, path, randomHex(8))
+	if err != nil {
+		return 0, nil, fmt.Errorf("%s %s: %w (Challenge: %q)", method, path, err, challengeHeader)
 	}
 
 	req2, err := http.NewRequest(method, url, bytes.NewReader(body))

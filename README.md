@@ -137,6 +137,12 @@ offizielles Fronius-API-Dokument.
   Nutzer eingerichtetes Zeitfenster**.
 - Kann mit einem Fronius-Firmware-Update ohne Vorwarnung brechen, da nicht
   offiziell dokumentiert.
+- Digest-Auth: MD5 und SHA-256 (gegen die RFC-7616-Testvektoren geprüft).
+  Die Challenge wird aus `WWW-Authenticate` oder `X-WWW-Authenticate`
+  gelesen. Gegen ein Gerät mit neuer Firmware ist das **nicht getestet**.
+- Retained gesendete `battery/cmd/*`-Nachrichten werden ignoriert, sonst
+  würde jeder Reconnect das Kommando erneut auslösen. Die Kommandos in
+  Loxone also ohne Retain-Flag senden.
 - Der "Login testen"-Button in der Web-UI führt **nur einen lesenden**
   Aufruf aus (prüft die Digest-Zugangsdaten), schreibt nie. Ein
   tatsächlicher Schreibzugriff passiert ausschließlich über die MQTT-
