@@ -280,11 +280,20 @@ sub fronius_discover {
 # ueberschreibt am Geraet konfigurierte Zeitplaene). Ein GET auf den
 # aufgeloesten Pfad reicht, um die Digest-Zugangsdaten zu pruefen: bei
 # falschem Passwort bleibt curl bei HTTP 401 haengen, bei richtigem
-# Passwort kommt (je nach Firmware) 200 ODER 405 (Methode nicht erlaubt)
-# zurueck - beides bedeutet "Login akzeptiert", nur 401 bedeutet "falsch".
+# Passwort kommt (je nach Firmware) 2xx ODER 405 (Methode nicht erlaubt)
+# zurueck - nur das bedeutet "Login akzeptiert". 404 = Pfad falsch, alles
+# andere = unbekannt, beides wird als Fehler gemeldet (frueher galt jeder
+# Code ausser 401 als OK - auch 404, d.h. der Login wurde gar nicht geprueft).
 sub battery_resolve_path {
     my ($host, $configured_path) = @_;
-    return $configured_path if $configured_path && $configured_path ne 'auto';
+    # Gleiche Abbildung wie NewBatteryController im Go-Daemon: das Dropdown
+    # speichert "/config" bzw. "/api/config", der Endpunkt ist jeweils
+    # .../timeofuse. Frueher wurde der Wert 1:1 abgefragt -> HTTP 404.
+    my %map = (
+        '/config' => '/config/timeofuse', '/config/timeofuse' => '/config/timeofuse',
+        '/api/config' => '/api/config/timeofuse', '/api/config/timeofuse' => '/api/config/timeofuse',
+    );
+    return $map{$configured_path} if $configured_path && $map{$configured_path};
     my (undef, $code) = curl_get("http://$host/api/config/timeofuse", '-o', '/dev/null', '-w', '%{http_code}');
     return '/api/config/timeofuse' if $code && $code ne '404';
     return '/config/timeofuse';
@@ -299,11 +308,27 @@ sub battery_test {
         "http://$host$path", '--digest', '-u', "$user:$password",
         '-o', '/dev/null', '-w', '%{http_code}',
     );
-    if (!defined($code) || $code eq '') {
+    if (!defined($code) || $code eq '' || $code eq '000') {
         return { ok => JSON::PP::false, error => "Wechselrichter unter $host nicht erreichbar", path => $path };
     }
     if ($code eq '401') {
+        # curl --digest wertet nur WWW-Authenticate aus. Schickt die
+        # Firmware die Challenge ausschliesslich in X-WWW-Authenticate,
+        # scheitert dieser Test auch mit richtigem Passwort - das gesondert
+        # melden (der Go-Dienst kann beide Header).
+        my (undef, $hdr) = curl_get("http://$host$path", '-o', '/dev/null', '-D', '-');
+        $hdr //= '';
+        if ($hdr =~ /^X-WWW-Authenticate:/mi && $hdr !~ /^WWW-Authenticate:/mi) {
+            return { ok => JSON::PP::false, path => $path, http_code => $code,
+                error => 'Firmware nutzt X-WWW-Authenticate - dieser Test kann den Login damit nicht pruefen (der Dienst selbst schon). Bitte per MQTT-Kommando testen.' };
+        }
         return { ok => JSON::PP::false, error => 'Login abgelehnt - Benutzername/Passwort pruefen', path => $path, http_code => $code };
+    }
+    if ($code eq '404') {
+        return { ok => JSON::PP::false, error => "Endpunkt $path existiert auf diesem Geraet nicht (HTTP 404) - anderen Endpunkt-Pfad waehlen", path => $path, http_code => $code };
+    }
+    if ($code !~ /^2\d\d$/ && $code ne '405') {
+        return { ok => JSON::PP::false, error => "Unerwartete Antwort HTTP $code auf $path", path => $path, http_code => $code };
     }
     return { ok => JSON::PP::true, path => $path, http_code => $code };
 }
